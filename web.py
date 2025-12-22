@@ -8,6 +8,7 @@ Original file is located at
 """
 
 from fastapi import FastAPI, UploadFile, File
+from fastapi.middleware.cors import CORSMiddleware
 import pandas as pd
 import numpy as np
 import joblib
@@ -16,14 +17,23 @@ import io
 
 app = FastAPI()
 
-# โหลดโมเดลที่เซฟไว้
+# --- 1. ตั้งค่า CORS (เปิดประตูให้ Vercel เข้ามาได้) ---
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # อนุญาตทุกเว็บ
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# --- 2. โหลดโมเดล AI ---
 artifacts = joblib.load("orchid_decision_tree_v1.pkl")
 model = artifacts["model"]
 le = artifacts["label_encoder"]
 medians = artifacts["medians"]
 feat_cols = artifacts["feature_columns"]
 
-# --- ฟังก์ชันคำนวณสูตรคณิตศาสตร์ (ก๊อปปี้มาจากโค้ดเพื่อนคุณเป๊ะๆ ห้ามแก้) ---
+# --- 3. สูตรคณิตศาสตร์ของเพื่อนคุณ (ห้ามแก้) ---
 def extract_peak_features(t, f):
     mask = ~np.isnan(t) & ~np.isnan(f)
     t = np.asarray(t[mask])
@@ -50,25 +60,31 @@ def extract_peak_features(t, f):
 
     return T_peak, F_peak, width, area
 
+# --- 4. ฟังก์ชันเตรียมข้อมูล (เหมือนโค้ดเพื่อน แต่ปรับให้รับไฟล์ Excel ใหม่ได้) ---
 def process_file(df):
-    # เลียนแบบ logic การหาคู่ T/F
     columns = df.columns.tolist()
     pairs = []
+
+    # จับคู่คอลัมน์ T และ F
     for col in columns:
         m = re.match(r"^(.*)T(\d+)$", col)
         if m:
             prefix, rep = m.group(1), m.group(2)
+            t_col = col
             f_col = f"{prefix}F{rep}"
+
+            # ถ้ามีคู่ F อยู่จริง ให้เก็บไว้
             if f_col in columns:
-                pairs.append((col, f_col))
+                pairs.append((t_col, f_col))
 
     features = []
     for t_col, f_col in pairs:
         t_vals = df[t_col].values
         f_vals = df[f_col].values
+
+        # เรียกใช้สูตรคำนวณ
         T_peak, F_peak, width, area = extract_peak_features(t_vals, f_vals)
 
-        # ดึงชื่อสายพันธุ์จากชื่อไฟล์หรือชื่อคอลัมน์ (ถ้ามี) หรือใส่ Unknown
         features.append({
             "sample_id": t_col,
             "T_peak": T_peak,
@@ -79,43 +95,54 @@ def process_file(df):
 
     feat_df = pd.DataFrame(features)
 
-    # แทนค่า NaN ด้วยค่า Median เดิมจากตอนเทรน (สำคัญมากเพื่อความแม่นยำ)
+    if feat_df.empty:
+        return feat_df
+
+    # แทนค่าที่หายไปด้วยค่า Median (ใช้ค่าเดียวกับตอนเทรน)
     for col in feat_cols:
         feat_df[col] = feat_df[col].astype(float)
-        # ใช้ median ที่เซฟมาจากตอนเทรน
         if col in medians:
              feat_df[col] = feat_df[col].fillna(medians[col])
 
     return feat_df
 
+# --- 5. ส่วนรับคำสั่งจากหน้าเว็บ ---
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
-    contents = await file.read()
-    df = pd.read_excel(io.BytesIO(contents))
+    try:
+        # อ่านไฟล์ Excel
+        contents = await file.read()
+        df = pd.read_excel(io.BytesIO(contents))
 
-    # 1. แปลงข้อมูล
-    processed_df = process_file(df)
+        # แปลงข้อมูล
+        processed_df = process_file(df)
 
-    if processed_df.empty:
-        return {"error": "No valid T/F pairs found"}
+        if processed_df.empty:
+            return {"error": "ไม่พบคู่ข้อมูล T/F ในไฟล์ Excel กรุณาตรวจสอบรูปแบบไฟล์"}
 
-    # 2. เตรียมข้อมูลเข้าโมเดล
-    X = processed_df[feat_cols].to_numpy()
+        # เตรียมข้อมูลเข้าโมเดล
+        X = processed_df[feat_cols].to_numpy()
 
-    # 3. ทำนาย
-    predictions = model.predict(X)
-    probabilities = model.predict_proba(X)
+        # ให้ AI ทำนาย
+        predictions = model.predict(X)
+        probabilities = model.predict_proba(X)
 
-    # 4. แปลงผลลัพธ์กลับเป็นชื่อสายพันธุ์
-    results = []
-    for i, pred_idx in enumerate(predictions):
-        species_name = le.inverse_transform([pred_idx])[0]
-        confidence = float(np.max(probabilities[i]))
+        # จัดรูปแบบผลลัพธ์ส่งกลับไปหน้าเว็บ
+        results = []
+        for i, pred_idx in enumerate(predictions):
+            species_name = le.inverse_transform([pred_idx])[0]
+            confidence = float(np.max(probabilities[i]))
 
-        results.append({
-            "sample_id": processed_df.iloc[i]["sample_id"],
-            "species": species_name,
-            "confidence": confidence
-        })
+            # แปลงเป็น %
+            confidence_percent = round(confidence * 100, 2)
 
-    return {"results": results}
+            results.append({
+                "sample_id": processed_df.iloc[i]["sample_id"],
+                "species": species_name,
+                "confidence": confidence_percent
+            })
+
+        return {"results": results}
+
+    except Exception as e:
+        return {"error": f"Server Error: {str(e)}"}
