@@ -43,7 +43,6 @@ except Exception as e:
     le = None
 
 def extract_peak_features(t, f):
-    # ตรวจสอบค่าว่าง
     mask = ~np.isnan(t) & ~np.isnan(f)
     t = np.asarray(t[mask])
     f = np.asarray(f[mask])
@@ -57,14 +56,11 @@ def extract_peak_features(t, f):
     F_peak = float(f[peak_idx])
     T_peak = float(t[peak_idx])
 
-    # --- จุดแก้บั๊ก (รองรับ NumPy ทุกเวอร์ชัน) ---
-    # ถ้าเป็น NumPy รุ่นใหม่ (2.0+) จะใช้ trapezoid
-    # ถ้าเป็น NumPy รุ่นเก่า จะใช้ trapz
+    # รองรับ NumPy เวอร์ชันใหม่และเก่า
     if hasattr(np, 'trapezoid'):
         area = float(np.trapezoid(f, x=t))
     else:
         area = float(np.trapz(f, t))
-    # ----------------------------------------
 
     half = F_peak / 2.0
     above_half = np.where(f >= half)[0]
@@ -78,6 +74,7 @@ def process_file(df):
     columns = df.columns.tolist()
     features = []
 
+    # วนลูปทีละคู่ (T1,F1 -> T2,F2 ... จนครบ 204 คู่)
     for i in range(0, len(columns) - 1, 2):
         t_col = columns[i]
         f_col = columns[i+1]
@@ -105,6 +102,7 @@ async def predict(file: UploadFile = File(...)):
         results = []
         for i in range(len(processed_df)):
             probs = probabilities[i]
+            # --- คัดมาแค่ 4 อันดับแรก (Top 4 Only) ---
             top_indices = np.argsort(probs)[::-1][:4]
 
             top_4_data = []
@@ -117,14 +115,14 @@ async def predict(file: UploadFile = File(...)):
                 except:
                     species_name = f"Species {pred_label_code}"
 
-                score = float(probs[idx] * 100)
+                score = float(probs[idx] * 100) # แปลงเป็นสเกล 0-100
                 if k == 0: max_score = score
 
                 if score > 0:
                     top_4_data.append({
                         "rank": k + 1,
                         "species": species_name,
-                        "confidence": score
+                        "confidence": score  # ส่งค่าคะแนนไปให้หน้าเว็บวาดกราฟ
                     })
 
             results.append({
