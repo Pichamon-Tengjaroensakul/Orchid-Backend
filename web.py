@@ -12,12 +12,11 @@ from fastapi.middleware.cors import CORSMiddleware
 import pandas as pd
 import numpy as np
 import joblib
-import re
 import io
 
 app = FastAPI()
 
-# --- 1. ตั้งค่า CORS ---
+# 1. อนุญาตให้เว็บเข้าถึงได้
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -26,22 +25,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- 2. โหลดโมเดล AI ---
-# ตรวจสอบให้แน่ใจว่าไฟล์ .pkl อยู่ใน Folder เดียวกัน
+# 2. โหลดโมเดล
 artifacts = joblib.load("orchid_decision_tree_v1.pkl")
 model = artifacts["model"]
 le = artifacts["label_encoder"]
 medians = artifacts["medians"]
 feat_cols = artifacts["feature_columns"]
 
-# --- 3. สูตรคณิตศาสตร์หา Peak (เหมือนเดิม) ---
+# 3. สูตรคณิตศาสตร์ (หา Peak)
 def extract_peak_features(t, f):
     mask = ~np.isnan(t) & ~np.isnan(f)
     t = np.asarray(t[mask])
     f = np.asarray(f[mask])
 
-    if len(t) < 3:
-        return np.nan, np.nan, np.nan, np.nan
+    if len(t) < 3: return np.nan, np.nan, np.nan, np.nan
 
     sort_idx = np.argsort(t)
     t = t[sort_idx]
@@ -61,51 +58,23 @@ def extract_peak_features(t, f):
 
     return T_peak, F_peak, width, area
 
-# --- 4. ฟังก์ชันเตรียมข้อมูล (ปรับปรุงใหม่: จับคู่ตามชื่อที่คล้ายกัน) ---
+# 4. ฟังก์ชันเตรียมข้อมูล (จับคู่ซ้าย-ขวา อัตโนมัติ)
 def process_file(df):
     columns = df.columns.tolist()
-    pairs = []
-
-    # วนลูปดูชื่อทุกคอลัมน์เพื่อหาตัว T (Temperature)
-    # Regex: ^(.*)T(\d+)$ แปลว่า "อะไรก็ได้ข้างหน้า" ตามด้วย "T" ตามด้วย "ตัวเลข"
-    for col in columns:
-        match = re.match(r"^(.*)T(\d+)$", col)
-        if match:
-            prefix = match.group(1) # เช่น "Ptanalba" หรือ "" (ถ้าชื่อแค่ T1)
-            number = match.group(2) # เช่น "1"
-
-            # สร้างชื่อคู่ F ที่ควรจะเป็น
-            # เช่นถ้าเจอ PtanalbaT1 ก็จะหา PtanalbaF1
-            expected_f_col = f"{prefix}F{number}"
-
-            # ถ้ามีคอลัมน์ F คู่กันอยู่จริง ให้จับคู่เลย
-            if expected_f_col in columns:
-                pairs.append((col, expected_f_col))
-
-    # ถ้าไม่เจอคู่เลย ลองใช้วิธีสำรอง (เผื่อชื่อเป็น T1, F1 แบบไม่มี prefix)
-    if not pairs:
-         for col in columns:
-             if col.startswith("T") and col[1:].isdigit():
-                 f_col = "F" + col[1:]
-                 if f_col in columns:
-                     pairs.append((col, f_col))
-
     features = []
-    for t_col, f_col in pairs:
-        # แปลงข้อมูลเป็นตัวเลข (กัน error)
+
+    # วนลูปทีละ 2 คอลัมน์ (0คู่1, 2คู่3, ...)
+    # ไม่สนชื่อหัวตาราง สนแค่ลำดับ
+    for i in range(0, len(columns) - 1, 2):
+        t_col = columns[i]     # คอลัมน์อุณหภูมิ
+        f_col = columns[i+1]   # คอลัมน์สัญญาณ
+
         t_vals = pd.to_numeric(df[t_col], errors='coerce').values
         f_vals = pd.to_numeric(df[f_col], errors='coerce').values
 
-        # คำนวณ
         T_peak, F_peak, width, area = extract_peak_features(t_vals, f_vals)
 
-        # ใช้ชื่อคอลัมน์ (ตัดคำว่า T/F ออก) เป็นชื่อ Sample ID
-        # เช่น PtanalbaT1 -> Sample: Ptanalba1
-        sample_name = t_col.replace("T", "").replace("F", "")
-        # หรือจะใช้ชื่อเต็มๆ ก็ได้: sample_name = t_col
-
         features.append({
-            "sample_id": sample_name,
             "T_peak": T_peak,
             "F_peak": F_peak,
             "Width_FWHM": width,
@@ -114,18 +83,15 @@ def process_file(df):
 
     feat_df = pd.DataFrame(features)
 
-    # เติมค่า Missing Value (ถ้ามี)
     if not feat_df.empty:
         for col in feat_cols:
-            if col not in feat_df.columns: # กันเหนียว
-                feat_df[col] = np.nan
+            if col not in feat_df.columns: feat_df[col] = np.nan
             feat_df[col] = feat_df[col].astype(float)
-            if col in medians:
-                feat_df[col] = feat_df[col].fillna(medians[col])
+            if col in medians: feat_df[col] = feat_df[col].fillna(medians[col])
 
     return feat_df
 
-# --- 5. API Endpoint ---
+# 5. API Endpoint
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
     try:
@@ -135,14 +101,11 @@ async def predict(file: UploadFile = File(...)):
         processed_df = process_file(df)
 
         if processed_df.empty:
-            return {"error": "ไม่พบคู่คอลัมน์ T และ F ที่ถูกต้อง (เช่น PtanalbaT1 คู่กับ PtanalbaF1)"}
-
-        # ตรวจสอบว่าคำนวณค่า Feature ได้จริงไหม
-        if processed_df["T_peak"].isnull().all():
-             return {"error": "ข้อมูลมีปัญหา ไม่สามารถหาจุดยอดกราฟ (Peak) ได้"}
+            return {"error": "ไม่พบข้อมูลที่จับคู่กันได้ในไฟล์"}
 
         X = processed_df[feat_cols].to_numpy()
 
+        # ทำนายผล
         predictions = model.predict(X)
         probabilities = model.predict_proba(X)
 
@@ -152,8 +115,8 @@ async def predict(file: UploadFile = File(...)):
             confidence = float(np.max(probabilities[i]))
             confidence_percent = round(confidence * 100, 2)
 
+            # ส่งกลับแค่ 2 ค่า ตามที่คุณขอ
             results.append({
-                "sample_id": str(processed_df.iloc[i]["sample_id"]), # แปลงเป็น string ให้ชัวร์
                 "species": species_name,
                 "confidence": confidence_percent
             })
@@ -161,4 +124,4 @@ async def predict(file: UploadFile = File(...)):
         return {"results": results}
 
     except Exception as e:
-        return {"error": f"Server Error: {str(e)}"}
+        return {"error": str(e)}
