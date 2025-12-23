@@ -16,7 +16,6 @@ import io
 
 app = FastAPI()
 
-# 1. อนุญาตให้เว็บเข้าถึงได้
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -25,14 +24,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 2. โหลดโมเดล
+# โหลดโมเดล
 artifacts = joblib.load("orchid_decision_tree_v1.pkl")
 model = artifacts["model"]
 le = artifacts["label_encoder"]
 medians = artifacts["medians"]
 feat_cols = artifacts["feature_columns"]
 
-# 3. สูตรคณิตศาสตร์ (หา Peak)
 def extract_peak_features(t, f):
     mask = ~np.isnan(t) & ~np.isnan(f)
     t = np.asarray(t[mask])
@@ -58,16 +56,14 @@ def extract_peak_features(t, f):
 
     return T_peak, F_peak, width, area
 
-# 4. ฟังก์ชันเตรียมข้อมูล (จับคู่ซ้าย-ขวา อัตโนมัติ)
 def process_file(df):
     columns = df.columns.tolist()
     features = []
 
-    # วนลูปทีละ 2 คอลัมน์ (0คู่1, 2คู่3, ...)
-    # ไม่สนชื่อหัวตาราง สนแค่ลำดับ
+    # จับคู่ตามตำแหน่ง (ไม่สนชื่อหัวตาราง)
     for i in range(0, len(columns) - 1, 2):
-        t_col = columns[i]     # คอลัมน์อุณหภูมิ
-        f_col = columns[i+1]   # คอลัมน์สัญญาณ
+        t_col = columns[i]
+        f_col = columns[i+1]
 
         t_vals = pd.to_numeric(df[t_col], errors='coerce').values
         f_vals = pd.to_numeric(df[f_col], errors='coerce').values
@@ -91,7 +87,6 @@ def process_file(df):
 
     return feat_df
 
-# 5. API Endpoint
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
     try:
@@ -105,21 +100,42 @@ async def predict(file: UploadFile = File(...)):
 
         X = processed_df[feat_cols].to_numpy()
 
-        # ทำนายผล
-        predictions = model.predict(X)
+        # คำนวณความน่าจะเป็น
         probabilities = model.predict_proba(X)
+        class_labels = model.classes_
 
         results = []
-        for i, pred_idx in enumerate(predictions):
-            species_name = le.inverse_transform([pred_idx])[0]
-            confidence = float(np.max(probabilities[i]))
-            confidence_percent = round(confidence * 100, 2)
+        for i in range(len(processed_df)):
+            probs = probabilities[i]
 
-            # ส่งกลับแค่ 2 ค่า ตามที่คุณขอ
+            # เรียงลำดับสายพันธุ์ภายในแถว (Top 4)
+            top_indices = np.argsort(probs)[::-1]
+            top_4_indices = top_indices[:4]
+
+            # สร้างข้อความแสดงผล
+            top_4_list = []
+            max_score = 0.0 # เก็บค่าความมั่นใจสูงสุดไว้ใช้เรียงบรรทัด
+
+            for k, idx in enumerate(top_4_indices):
+                species = class_labels[idx]
+                score = probs[idx] * 100
+
+                # เก็บค่าสูงสุดของแถวนี้
+                if k == 0:
+                    max_score = score
+
+                if score > 0.0:
+                    top_4_list.append(f"{species} ({score:.2f}%)")
+
+            display_text = ", ".join(top_4_list)
+
             results.append({
-                "species": species_name,
-                "confidence": confidence_percent
+                "top_4_result": display_text,
+                "sort_score": max_score # ใส่ไว้สำหรับเรียงลำดับ
             })
+
+        # --- จุดสำคัญ: เรียงลำดับแถวตามความมั่นใจ (มาก -> น้อย) ---
+        results.sort(key=lambda x: x["sort_score"], reverse=True)
 
         return {"results": results}
 
