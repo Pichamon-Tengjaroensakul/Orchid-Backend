@@ -25,21 +25,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- 1. หน้า Home (กัน 404) ---
 @app.get("/")
 def home():
-    return {"message": "Orchid API is running! (Use POST /predict to upload files)"}
+    return {"message": "Orchid API is running!"}
 
 # โหลดโมเดล
 try:
     artifacts = joblib.load("orchid_decision_tree_v1.pkl")
     model = artifacts["model"]
+    le = artifacts["label_encoder"]
     feat_cols = artifacts["feature_columns"]
     class_labels = model.classes_
     print("✅ Model loaded successfully.")
 except Exception as e:
     print(f"❌ Model loading failed: {e}")
     model = None
+    le = None
 
 def extract_peak_features(t, f):
     mask = ~np.isnan(t) & ~np.isnan(f)
@@ -55,14 +56,10 @@ def extract_peak_features(t, f):
     F_peak = float(f[peak_idx])
     T_peak = float(t[peak_idx])
 
-    # --- จุดที่แก้ไข (Fixed NumPy 2.0 Error) ---
-    # ถ้ามีคำสั่ง trapezoid (NumPy ใหม่) ให้ใช้
-    # ถ้าไม่มี ให้ใช้ trapz (NumPy เก่า)
     if hasattr(np, 'trapezoid'):
         area = float(np.trapezoid(f, x=t))
     else:
         area = float(np.trapz(f, t))
-    # ----------------------------------------
 
     half = F_peak / 2.0
     above_half = np.where(f >= half)[0]
@@ -75,37 +72,27 @@ def extract_peak_features(t, f):
 def process_file(df):
     columns = df.columns.tolist()
     features = []
-    print(f"📊 Processing File: Found {len(columns)} columns.")
 
     for i in range(0, len(columns) - 1, 2):
         t_col = columns[i]
         f_col = columns[i+1]
-
         t_vals = pd.to_numeric(df[t_col], errors='coerce').values
         f_vals = pd.to_numeric(df[f_col], errors='coerce').values
-
         T_peak, F_peak, width, area = extract_peak_features(t_vals, f_vals)
-
         if not np.isnan(T_peak):
-            features.append({
-                "T_peak": T_peak, "F_peak": F_peak, "Width_FWHM": width, "Area": area
-            })
-
-    print(f"✅ Extracted features for {len(features)} samples.")
+            features.append({"T_peak": T_peak, "F_peak": F_peak, "Width_FWHM": width, "Area": area})
     return pd.DataFrame(features)
 
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
     try:
-        if model is None: return {"results": [{"top_4_result": "System Error: Model not loaded", "sort_score": 0}]}
+        if model is None: return {"results": []} # ส่งลิสต์ว่างถ้าโมเดลพัง
 
         contents = await file.read()
         df = pd.read_excel(io.BytesIO(contents))
-
         processed_df = process_file(df)
 
-        if processed_df.empty:
-            return {"results": [{"top_4_result": "Data Error: ไม่พบข้อมูลคู่กราฟในไฟล์ (ตรวจสอบคอลัมน์)", "sort_score": 0}]}
+        if processed_df.empty: return {"results": []}
 
         X = processed_df[feat_cols].to_numpy()
         probabilities = model.predict_proba(X)
@@ -115,17 +102,29 @@ async def predict(file: UploadFile = File(...)):
             probs = probabilities[i]
             top_indices = np.argsort(probs)[::-1][:4]
 
-            top_4_list = []
+            # --- สร้างข้อมูลแบบละเอียดสำหรับ Top 4 ---
+            top_4_data = []
             max_score = 0.0
 
             for k, idx in enumerate(top_indices):
-                species = class_labels[idx]
-                score = probs[idx] * 100
+                pred_label_code = class_labels[idx]
+                try:
+                    species_name = le.inverse_transform([pred_label_code])[0]
+                except:
+                    species_name = f"Species {pred_label_code}"
+
+                score = float(probs[idx] * 100)
                 if k == 0: max_score = score
-                if score > 0: top_4_list.append(f"{species} ({score:.2f}%)")
+
+                if score > 0:
+                    top_4_data.append({
+                        "rank": k + 1,           # อันดับ 1, 2, 3, 4
+                        "species": species_name, # ชื่อสายพันธุ์
+                        "confidence": score      # คะแนนดิบ (เอาไปทำกราฟ)
+                    })
 
             results.append({
-                "top_4_result": ", ".join(top_4_list),
+                "top_4_details": top_4_data,  # ส่งก้อนข้อมูลนี้ไปให้หน้าเว็บวาดรูป
                 "sort_score": max_score
             })
 
@@ -134,4 +133,4 @@ async def predict(file: UploadFile = File(...)):
 
     except Exception as e:
         print(traceback.format_exc())
-        return {"results": [{"top_4_result": f"System Error: {str(e)}", "sort_score": 0}]}
+        return {"results": []}
