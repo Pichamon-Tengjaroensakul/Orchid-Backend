@@ -13,6 +13,7 @@ import pandas as pd
 import numpy as np
 import joblib
 import io
+import traceback # เพิ่มตัวช่วยแกะรอย Error
 
 app = FastAPI()
 
@@ -25,11 +26,18 @@ app.add_middleware(
 )
 
 # โหลดโมเดล
-artifacts = joblib.load("orchid_decision_tree_v1.pkl")
-model = artifacts["model"]
-le = artifacts["label_encoder"]
-medians = artifacts["medians"]
-feat_cols = artifacts["feature_columns"]
+try:
+    artifacts = joblib.load("orchid_decision_tree_v1.pkl")
+    model = artifacts["model"]
+    le = artifacts["label_encoder"]
+    medians = artifacts["medians"]
+    feat_cols = artifacts["feature_columns"]
+    print("Model loaded successfully.")
+except Exception as e:
+    print(f"Model loading failed: {e}")
+    # ถ้าโหลดโมเดลไม่ได้ ให้เก็บ error ไว้บอก user
+    model_error = str(e)
+    model = None
 
 def extract_peak_features(t, f):
     mask = ~np.isnan(t) & ~np.isnan(f)
@@ -60,11 +68,12 @@ def process_file(df):
     columns = df.columns.tolist()
     features = []
 
-    # จับคู่ตามตำแหน่ง (ไม่สนชื่อหัวตาราง)
+    # วนลูปจับคู่
     for i in range(0, len(columns) - 1, 2):
         t_col = columns[i]
         f_col = columns[i+1]
 
+        # แปลงเป็นตัวเลข (บังคับ)
         t_vals = pd.to_numeric(df[t_col], errors='coerce').values
         f_vals = pd.to_numeric(df[f_col], errors='coerce').values
 
@@ -90,54 +99,63 @@ def process_file(df):
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
     try:
+        # เช็คว่าโมเดลพร้อมไหม
+        if model is None:
+            return {"results": [{"top_4_result": f"System Error: Model failed to load ({model_error})", "sort_score": 0}]}
+
         contents = await file.read()
-        df = pd.read_excel(io.BytesIO(contents))
+        try:
+            df = pd.read_excel(io.BytesIO(contents))
+        except Exception as read_err:
+             return {"results": [{"top_4_result": f"File Error: ไม่สามารถอ่านไฟล์ Excel ได้ ({str(read_err)})", "sort_score": 0}]}
+
+        if df.empty:
+             return {"results": [{"top_4_result": "File Error: ไฟล์ว่างเปล่า ไม่มีข้อมูล", "sort_score": 0}]}
 
         processed_df = process_file(df)
 
         if processed_df.empty:
-            return {"error": "ไม่พบข้อมูลที่จับคู่กันได้ในไฟล์"}
+            return {"results": [{"top_4_result": "Data Error: ไม่พบข้อมูลที่จับคู่ได้ (ตรวจสอบว่าไฟล์มีคอลัมน์ T และ F เรียงคู่กัน)", "sort_score": 0}]}
 
         X = processed_df[feat_cols].to_numpy()
 
-        # คำนวณความน่าจะเป็น
+        # เช็คข้อมูลก่อนทำนาย
+        if np.isnan(X).all():
+             return {"results": [{"top_4_result": "Data Error: ข้อมูลเป็นค่าว่างทั้งหมด (ตรวจสอบไฟล์ Excel ว่าเป็นตัวเลข)", "sort_score": 0}]}
+
+        # ทำนาย
         probabilities = model.predict_proba(X)
         class_labels = model.classes_
 
         results = []
         for i in range(len(processed_df)):
             probs = probabilities[i]
-
-            # เรียงลำดับสายพันธุ์ภายในแถว (Top 4)
             top_indices = np.argsort(probs)[::-1]
             top_4_indices = top_indices[:4]
 
-            # สร้างข้อความแสดงผล
             top_4_list = []
-            max_score = 0.0 # เก็บค่าความมั่นใจสูงสุดไว้ใช้เรียงบรรทัด
+            max_score = 0.0
 
             for k, idx in enumerate(top_4_indices):
                 species = class_labels[idx]
                 score = probs[idx] * 100
-
-                # เก็บค่าสูงสุดของแถวนี้
-                if k == 0:
-                    max_score = score
-
+                if k == 0: max_score = score
                 if score > 0.0:
                     top_4_list.append(f"{species} ({score:.2f}%)")
 
             display_text = ", ".join(top_4_list)
+            if not display_text: display_text = "Unknown / Low Confidence"
 
             results.append({
                 "top_4_result": display_text,
-                "sort_score": max_score # ใส่ไว้สำหรับเรียงลำดับ
+                "sort_score": max_score
             })
 
-        # --- จุดสำคัญ: เรียงลำดับแถวตามความมั่นใจ (มาก -> น้อย) ---
         results.sort(key=lambda x: x["sort_score"], reverse=True)
-
         return {"results": results}
 
     except Exception as e:
-        return {"error": str(e)}
+        # ไม้ตาย: จับ Error ทุกอย่างแล้วส่งกลับไปแสดงผล
+        error_msg = f"System Error: {str(e)}"
+        print(traceback.format_exc()) # ปริ้นท์ลง Logs ด้วย
+        return {"results": [{"top_4_result": error_msg, "sort_score": 0}]}
