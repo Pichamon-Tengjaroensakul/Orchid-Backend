@@ -31,7 +31,7 @@ app.add_middleware(
 def home():
     return {"message": "Orchid API is running!"}
 
-# --- โหลดโมเดล ---
+# --- 1. โหลดโมเดล (Decision Tree) ---
 try:
     artifacts = joblib.load("orchid_decision_tree_v1.pkl")
     model = artifacts["model"]
@@ -44,6 +44,7 @@ except Exception as e:
     model = None
     le = None
 
+# --- 2. ฟังก์ชันสกัด Feature (เหมือนของเพื่อนคุณ) ---
 def extract_peak_features(t, f):
     mask = ~np.isnan(t) & ~np.isnan(f)
     t = np.asarray(t[mask])
@@ -71,23 +72,25 @@ def extract_peak_features(t, f):
         width = np.nan
     return T_peak, F_peak, width, area
 
+# --- 3. ฟังก์ชันดึงชื่อสายพันธุ์ (ตัดเลขออก) ---
 def get_species_name(col_name):
-    # ใช้ Regex เดียวกับไฟล์ finish_model.py ของเพื่อนคุณ
-    # คือเอาเฉพาะตัวอักษรภาษาอังกฤษข้างหน้า (เช่น Csp015 -> Csp)
+    # ใช้ Regex ตัดเอาเฉพาะชื่อภาษาอังกฤษข้างหน้า (เช่น PtanalbaT1 -> Ptanalba)
     m = re.match(r"^([A-Za-z]+)", str(col_name))
     if m:
         return m.group(1)
     return "Unknown"
 
+# --- 4. ฟังก์ชันหลัก: จัดกลุ่มและทำนาย ---
 def process_file_and_group(df):
     columns = df.columns.tolist()
     grouped_data = defaultdict(list)
 
+    # วนลูปจับคู่ T และ F
     for i in range(0, len(columns) - 1, 2):
         t_col = columns[i]
         f_col = columns[i+1]
 
-        # จัดกลุ่มตามตรรกะโมเดลเพื่อนคุณ
+        # ดึงชื่อกลุ่ม (เช่น Ptanalba)
         group_name = get_species_name(t_col)
 
         t_vals = pd.to_numeric(df[t_col], errors='coerce').values
@@ -96,6 +99,7 @@ def process_file_and_group(df):
         T_peak, F_peak, width, area = extract_peak_features(t_vals, f_vals)
 
         if not np.isnan(T_peak):
+            # เก็บค่าลงในกลุ่มเดียวกัน
             grouped_data[group_name].append([T_peak, F_peak, width, area])
 
     return grouped_data
@@ -108,29 +112,31 @@ async def predict(file: UploadFile = File(...)):
         contents = await file.read()
         df = pd.read_excel(io.BytesIO(contents))
 
-        # 1. จัดกลุ่มข้อมูล
+        # จัดกลุ่มข้อมูล (Group Data)
         grouped_features = process_file_and_group(df)
 
         if not grouped_features: return {"results": []}
 
         results = []
 
-        # 2. วิเคราะห์ทีละกลุ่ม
+        # วิเคราะห์ทีละกลุ่ม (เช่น Ptanalba กลุ่มนึง, Ctri กลุ่มนึง)
         for group_name, features_list in grouped_features.items():
             X_group = np.array(features_list)
 
-            # ทำนายความน่าจะเป็นและหาค่าเฉลี่ย (Group Analysis)
+            # ใช้ Decision Tree ทำนายทุกเส้นในกลุ่ม
             probs_group = model.predict_proba(X_group)
+
+            # **หาค่าเฉลี่ยความน่าจะเป็น (Average Probability)**
+            # นี่คือจุดสำคัญที่ทำให้ข้อมูลหลาย Sample ถูกวิเคราะห์รวมกันเป็นหนึ่งเดียว
             avg_probs = np.mean(probs_group, axis=0)
 
-            # เรียงจากมากไปน้อย (Descending)
+            # เรียงลำดับความมั่นใจ (Top 4)
             top_indices = np.argsort(avg_probs)[::-1][:4]
 
             top_4_data = []
             max_score = 0.0
 
-            # สร้าง List ข้อความสำหรับส่งไปโชว์
-            # เราฟอร์แมตข้อความที่นี่เลย เพื่อให้หน้าเว็บแสดงผลสวยโดยไม่ต้องแก้ Frontend
+            # จัดรูปแบบข้อความ List (1. Name 70%) ให้ Frontend เอาไปโชว์ได้เลย
             for k, idx in enumerate(top_indices):
                 pred_label_code = class_labels[idx]
                 try:
@@ -138,28 +144,25 @@ async def predict(file: UploadFile = File(...)):
                 except:
                     species_name = "Unknown"
 
-                score = int(round(avg_probs[idx] * 100)) # ปัดเศษเป็นจำนวนเต็ม
+                score = int(round(avg_probs[idx] * 100))
                 if k == 0: max_score = score
 
-                if score >= 0: # แสดงทุกอันดับแม้คะแนนน้อย
-                    # จัดรูปแบบข้อความตรงนี้: "1. Ptanalba 70%"
+                if score >= 0:
                     display_text = f"{k + 1}. {species_name} {score}%"
-
                     top_4_data.append({
                         "rank": k + 1,
-                        "species": display_text, # ส่งข้อความที่จัดแล้วไปในช่องชื่อเลย
+                        "species": display_text,
                         "confidence": score
                     })
 
             results.append({
-                # ส่งค่าว่างไปที่ filename เพื่อซ่อนชื่อกลุ่ม (เพราะแก้ Frontend ไม่ได้)
-                "filename": "",
-                "group_real_name": group_name, # เผื่อไว้ใช้ debug
+                "filename": "", # ซ่อนชื่อไฟล์/กลุ่ม เพื่อความสะอาดตา
+                "group_real_name": group_name,
                 "top_4_details": top_4_data,
                 "sort_score": max_score
             })
 
-        # เรียงลำดับบรรทัดตามความมั่นใจสูงสุด
+        # เรียงลำดับบรรทัดตามคะแนนความมั่นใจ
         results.sort(key=lambda x: x["sort_score"], reverse=True)
         return {"results": results}
 
