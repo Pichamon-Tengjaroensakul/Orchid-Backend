@@ -59,6 +59,7 @@ def extract_peak_features(t, f):
     F_peak = float(f[peak_idx])
     T_peak = float(t[peak_idx])
 
+    # รองรับ numpy เวอร์ชันใหม่ (trapezoid) และเก่า (trapz)
     if hasattr(np, 'trapezoid'):
         area = float(np.trapezoid(f, x=t))
     else:
@@ -72,15 +73,16 @@ def extract_peak_features(t, f):
         width = np.nan
     return T_peak, F_peak, width, area
 
-# --- 3. ฟังก์ชันดึงชื่อสายพันธุ์ (ตัดเลขออก) ---
-def get_species_name(col_name):
-    # ใช้ Regex ตัดเอาเฉพาะชื่อภาษาอังกฤษข้างหน้า (เช่น PtanalbaT1 -> Ptanalba)
+# --- 3. ฟังก์ชันดึงชื่อกลุ่ม (ใช้ตรรกะเดียวกับ finish_model.py) ---
+def get_species_group_name(col_name):
+    # ใช้ Regex ดึงเฉพาะตัวอักษรภาษาอังกฤษข้างหน้า
+    # เช่น "PtanalbaT1" -> "Ptanalba", "Csp015T3" -> "Csp"
     m = re.match(r"^([A-Za-z]+)", str(col_name))
     if m:
         return m.group(1)
     return "Unknown"
 
-# --- 4. ฟังก์ชันหลัก: จัดกลุ่มและทำนาย ---
+# --- 4. ฟังก์ชันหลัก: จัดกลุ่มและเตรียมข้อมูล ---
 def process_file_and_group(df):
     columns = df.columns.tolist()
     grouped_data = defaultdict(list)
@@ -91,7 +93,7 @@ def process_file_and_group(df):
         f_col = columns[i+1]
 
         # ดึงชื่อกลุ่ม (เช่น Ptanalba)
-        group_name = get_species_name(t_col)
+        group_name = get_species_group_name(t_col)
 
         t_vals = pd.to_numeric(df[t_col], errors='coerce').values
         f_vals = pd.to_numeric(df[f_col], errors='coerce').values
@@ -99,7 +101,7 @@ def process_file_and_group(df):
         T_peak, F_peak, width, area = extract_peak_features(t_vals, f_vals)
 
         if not np.isnan(T_peak):
-            # เก็บค่าลงในกลุ่มเดียวกัน
+            # เก็บค่าฟีเจอร์ลงในกลุ่มนั้นๆ
             grouped_data[group_name].append([T_peak, F_peak, width, area])
 
     return grouped_data
@@ -112,31 +114,32 @@ async def predict(file: UploadFile = File(...)):
         contents = await file.read()
         df = pd.read_excel(io.BytesIO(contents))
 
-        # จัดกลุ่มข้อมูล (Group Data)
+        # 1. จัดกลุ่มข้อมูล (Group Similar Names)
         grouped_features = process_file_and_group(df)
 
         if not grouped_features: return {"results": []}
 
         results = []
 
-        # วิเคราะห์ทีละกลุ่ม (เช่น Ptanalba กลุ่มนึง, Ctri กลุ่มนึง)
+        # 2. วิเคราะห์ทีละกลุ่ม (Combine & Analyze)
         for group_name, features_list in grouped_features.items():
+            # แปลงข้อมูลทั้งหมดในกลุ่มเป็น Array เดียว
             X_group = np.array(features_list)
 
-            # ใช้ Decision Tree ทำนายทุกเส้นในกลุ่ม
+            # ให้ Model ทำนายความน่าจะเป็นของทุกเส้นในกลุ่มนี้
             probs_group = model.predict_proba(X_group)
 
-            # **หาค่าเฉลี่ยความน่าจะเป็น (Average Probability)**
-            # นี่คือจุดสำคัญที่ทำให้ข้อมูลหลาย Sample ถูกวิเคราะห์รวมกันเป็นหนึ่งเดียว
+            # *** รวมผลลัพธ์: หาค่าเฉลี่ยความน่าจะเป็นของทั้งกลุ่ม ***
+            # นี่คือขั้นตอนที่ยุบหลาย Sample ให้เหลือผลลัพธ์เดียว
             avg_probs = np.mean(probs_group, axis=0)
 
-            # เรียงลำดับความมั่นใจ (Top 4)
+            # หา Top 4 จากค่าเฉลี่ย
             top_indices = np.argsort(avg_probs)[::-1][:4]
 
             top_4_data = []
             max_score = 0.0
 
-            # จัดรูปแบบข้อความ List (1. Name 70%) ให้ Frontend เอาไปโชว์ได้เลย
+            # สร้างข้อความผลลัพธ์ (List 1-4)
             for k, idx in enumerate(top_indices):
                 pred_label_code = class_labels[idx]
                 try:
@@ -156,7 +159,8 @@ async def predict(file: UploadFile = File(...)):
                     })
 
             results.append({
-                "filename": "", # ซ่อนชื่อไฟล์/กลุ่ม เพื่อความสะอาดตา
+                # ส่งค่าว่างไปที่ filename เพื่อซ่อนชื่อกลุ่มในหน้าเว็บ (Trick)
+                "filename": "",
                 "group_real_name": group_name,
                 "top_4_details": top_4_data,
                 "sort_score": max_score
