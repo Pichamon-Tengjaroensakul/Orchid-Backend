@@ -7,22 +7,92 @@ Original file is located at
     https://colab.research.google.com/drive/1jmVvhF0P0bjtQsoTRzcq-PRNTruKvQ1Q
 """
 
-# test_model_directly.py
+from fastapi import FastAPI, UploadFile, File
+from fastapi.middleware.cors import CORSMiddleware
 import pandas as pd
 import numpy as np
 import joblib
+import io
+import traceback
 import re
+import os
 
-# --- โหลดโมเดล ---
-artifacts = joblib.load("orchid_decision_tree_v1.pkl")
-model = artifacts["model"]
-le = artifacts["label_encoder"]
+app = FastAPI(
+    title="Orchid Species Classifier API",
+    description="Predict orchid species using the exact same logic as the original Colab",
+    version="1.0.1"
+)
 
-# --- โหลดข้อมูล test ---
-df = pd.read_excel("df_test.xlsx")
-print("Test file shape:", df.shape)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-# --- ฟังก์ชันเดียวกับ Colab และ web.py ---
+# --- Load Model ---
+MODEL_PATH = "orchid_decision_tree_v1.pkl"
+
+model = None
+le = None
+class_labels = None
+
+if os.path.exists(MODEL_PATH):
+    try:
+        artifacts = joblib.load(MODEL_PATH)
+        model = artifacts["model"]
+        le = artifacts["label_encoder"]
+        class_labels = model.classes_
+        print("✅ Model loaded successfully.")
+        print(f"Total classes: {len(class_labels)}")
+    except Exception as e:
+        print(f"❌ Model loading failed: {e}")
+        model = None
+else:
+    print(f"⚠️ Model file not found: {MODEL_PATH}")
+
+@app.get("/")
+def home():
+    return {
+        "message": "Orchid API is running!",
+        "model_loaded": model is not None
+    }
+
+# --- EXACT SAME FEATURE EXTRACTION AS COLAB ---
+def extract_peak_features(t, f):
+    """Identical to the Colab version — uses np.trapz, same NaN handling"""
+    mask = ~np.isnan(t) & ~np.isnan(f)
+    t = np.asarray(t[mask])
+    f = np.asarray(f[mask])
+
+    if len(t) < 3:
+        return np.nan, np.nan, np.nan, np.nan
+
+    # Sort by temperature
+    sort_idx = np.argsort(t)
+    t = t[sort_idx]
+    f = f[sort_idx]
+
+    # Peak detection
+    peak_idx = np.argmax(f)
+    F_peak = float(f[peak_idx])
+    T_peak = float(t[peak_idx])
+
+    # Area under curve — USE np.trapz (NOT trapezoid)
+    area = float(np.trapz(f, t))
+
+    # Full Width at Half Maximum (FWHM)
+    half = F_peak / 2.0
+    above_half = np.where(f >= half)[0]
+    if len(above_half) >= 2:
+        width = float(t[above_half[-1]] - t[above_half[0]])
+    else:
+        width = np.nan
+
+    return T_peak, F_peak, width, area
+
+# --- EXACT SAME T/F PAIR DETECTION AS COLAB ---
 def find_tf_pairs(columns):
     pairs = []
     for col in columns:
@@ -35,45 +105,76 @@ def find_tf_pairs(columns):
                 pairs.append((t_col, f_col))
     return pairs
 
-def extract_peak_features(t, f):
-    mask = ~np.isnan(t) & ~np.isnan(f)
-    t, f = np.asarray(t[mask]), np.asarray(f[mask])
-    if len(t) < 3: return np.nan, np.nan, np.nan, np.nan
-    sort_idx = np.argsort(t)
-    t, f = t[sort_idx], f[sort_idx]
-    peak_idx = np.argmax(f)
-    F_peak = float(f[peak_idx])
-    T_peak = float(t[peak_idx])
-    area = float(np.trapz(f, t))
-    half = F_peak / 2.0
-    above_half = np.where(f >= half)[0]
-    width = float(t[above_half[-1]] - t[above_half[0]]) if len(above_half) >= 2 else np.nan
-    return T_peak, F_peak, width, area
+# --- Prediction Endpoint ---
+@app.post("/predict")
+async def predict(file: UploadFile = File(...)):
+    try:
+        if model is None:
+            return {"error": "Model not loaded", "results": []}
 
-# --- ดึงฟีเจอร์ทั้งหมด ---
-tf_pairs = find_tf_pairs(df.columns)
-all_features = []
-sample_ids = []
+        # Read file
+        contents = await file.read()
+        df = pd.read_excel(io.BytesIO(contents))
+        print(f"📥 File received: {df.shape}")
 
-for t_col, f_col in tf_pairs:
-    t_vals = df[t_col].values
-    f_vals = df[f_col].values
-    T_peak, F_peak, width, area = extract_peak_features(t_vals, f_vals)
-    if not np.isnan(T_peak):
-        all_features.append([T_peak, F_peak, width, area])
-        sample_ids.append(t_col)
+        # Find T/F pairs
+        tf_pairs = find_tf_pairs(df.columns.tolist())
+        if not tf_pairs:
+            return {"error": "No valid T/F column pairs found", "results": []}
 
-X_test = np.array(all_features)
-print(f"Extracted {len(all_features)} samples")
+        # Extract features EXACTLY like Colab
+        all_features = []
+        for t_col, f_col in tf_pairs:
+            t_vals = pd.to_numeric(df[t_col], errors='coerce').values
+            f_vals = pd.to_numeric(df[f_col], errors='coerce').values
+            T_peak, F_peak, width, area = extract_peak_features(t_vals, f_vals)
+            if not np.isnan(T_peak):
+                # Important: Keep order [T_peak, F_peak, width, area]
+                all_features.append([T_peak, F_peak, width, area])
 
-# --- ทำนาย ---
-probs = model.predict_proba(X_test)
-avg_probs = np.mean(probs, axis=0)  # เหมือนเว็บ: รวมทุก sample เป็นผลเดียว
+        if not all_features:
+            return {"error": "No valid features extracted", "results": []}
 
-# --- แสดงผล Top 4 ---
-top_indices = np.argsort(avg_probs)[::-1][:4]
-print("\n🧪 ผลการทำนาย (จากโมเดลโดยตรง):")
-for rank, idx in enumerate(top_indices, 1):
-    species = le.inverse_transform([model.classes_[idx]])[0]
-    conf = int(round(avg_probs[idx] * 100))
-    print(f"{rank}. {species} ({conf}%)")
+        X_all = np.array(all_features)
+        print(f"🧠 Input shape: {X_all.shape}")
+
+        # Predict — no feature name validation (sklearn doesn't need it)
+        probs_all = model.predict_proba(X_all)
+        avg_probs = np.mean(probs_all, axis=0)
+
+        # Get top 4
+        top_indices = np.argsort(avg_probs)[::-1][:4]
+
+        top_4_data = []
+        max_score = 0
+        for rank, idx in enumerate(top_indices, start=1):
+            label_code = class_labels[idx]
+            try:
+                species_name = le.inverse_transform([label_code])[0]
+            except Exception:
+                species_name = "Unknown"
+
+            confidence = int(round(avg_probs[idx] * 100))
+            if rank == 1:
+                max_score = confidence
+
+            display_text = f"{rank}. {species_name} {confidence}%"
+            top_4_data.append({
+                "rank": rank,
+                "species": display_text,
+                "confidence": confidence
+            })
+
+        result = {
+            "filename": file.filename,
+            "group_real_name": "Combined Prediction",
+            "top_4_details": top_4_data,
+            "sort_score": max_score
+        }
+
+        return {"results": [result]}
+
+    except Exception as e:
+        print("❌ Prediction error:")
+        print(traceback.format_exc())
+        return {"error": str(e), "results": []}
