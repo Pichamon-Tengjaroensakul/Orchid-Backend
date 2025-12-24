@@ -19,11 +19,10 @@ import os
 
 app = FastAPI(
     title="Orchid Species Classifier API",
-    description="Predict orchid species from thermal-fluorescence data using Decision Tree (identical to Colab)",
-    version="1.1.0"
+    description="Predict orchid species using the exact same logic as your friend's Colab",
+    version="1.2.0"
 )
 
-# Allow all origins
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -32,7 +31,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- 1. Load Model ---
+# --- Load Model ---
 MODEL_PATH = "orchid_decision_tree_v1.pkl"
 
 model = None
@@ -46,6 +45,7 @@ if os.path.exists(MODEL_PATH):
         le = artifacts["label_encoder"]
         class_labels = model.classes_
         print("✅ Model loaded successfully.")
+        print(f"Total classes: {len(class_labels)}")
     except Exception as e:
         print(f"❌ Model loading failed: {e}")
 else:
@@ -58,7 +58,7 @@ def home():
         "model_loaded": model is not None
     }
 
-# --- 2. Feature Extraction (identical to Colab) ---
+# --- EXACT FEATURE EXTRACTION FROM COLAB ---
 def extract_peak_features(t, f):
     mask = ~np.isnan(t) & ~np.isnan(f)
     t = np.asarray(t[mask])
@@ -74,8 +74,11 @@ def extract_peak_features(t, f):
     F_peak = float(f[peak_idx])
     T_peak = float(t[peak_idx])
 
-    # ✅ ใช้ np.trapz เหมือน Colab ต้นฉบับ (ไม่ใช้ trapezoid)
-    area = float(np.trapz(f, t))
+    # ✅ ใช้ np.trapz เหมือน Colab (แต่รองรับ numpy ใหม่ด้วยการ fallback)
+    if hasattr(np, 'trapezoid'):
+        area = float(np.trapezoid(f, x=t))
+    else:
+        area = float(np.trapz(f, t))
 
     half = F_peak / 2.0
     above_half = np.where(f >= half)[0]
@@ -83,9 +86,10 @@ def extract_peak_features(t, f):
         width = float(t[above_half[-1]] - t[above_half[0]])
     else:
         width = np.nan
+
     return T_peak, F_peak, width, area
 
-# --- 3. T/F Pair Detection (identical to Colab) ---
+# --- EXACT T/F PAIR DETECTION FROM COLAB ---
 def find_tf_pairs(columns):
     pairs = []
     for col in columns:
@@ -98,7 +102,7 @@ def find_tf_pairs(columns):
                 pairs.append((t_col, f_col))
     return pairs
 
-# --- 4. Main Prediction Endpoint ---
+# --- Prediction Endpoint ---
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
     try:
@@ -115,7 +119,7 @@ async def predict(file: UploadFile = File(...)):
         if not tf_pairs:
             return {"error": "No valid T/F column pairs found", "results": []}
 
-        # Extract features from ALL pairs
+        # Extract features exactly like Colab
         all_features = []
         for t_col, f_col in tf_pairs:
             t_vals = pd.to_numeric(df[t_col], errors='coerce').values
