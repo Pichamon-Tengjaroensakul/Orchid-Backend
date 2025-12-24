@@ -15,10 +15,15 @@ import joblib
 import io
 import traceback
 import re
-from collections import defaultdict
+import os
 
-app = FastAPI()
+app = FastAPI(
+    title="Orchid Species Classifier API",
+    description="Predict orchid species from thermal-fluorescence data using Decision Tree",
+    version="1.0.0"
+)
 
+# Allow all origins (adjust for production)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -27,29 +32,43 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.get("/")
-def home():
-    return {"message": "Orchid API is running!"}
+# --- 1. Load Model ---
+MODEL_PATH = "orchid_decision_tree_v1.pkl"
 
-# --- 1. โหลดโมเดล (Decision Tree) ---
-try:
-    artifacts = joblib.load("orchid_decision_tree_v1.pkl")
-    model = artifacts["model"]
-    le = artifacts["label_encoder"]
-    feat_cols = artifacts["feature_columns"]
-    class_labels = model.classes_
-    print("✅ Model loaded successfully.")
-except Exception as e:
-    print(f"❌ Model loading failed: {e}")
+if os.path.exists(MODEL_PATH):
+    try:
+        artifacts = joblib.load(MODEL_PATH)
+        model = artifacts["model"]
+        le = artifacts["label_encoder"]
+        expected_features = artifacts["feature_columns"]
+        class_labels = model.classes_
+        print("✅ Model loaded successfully.")
+        print("Expected features:", expected_features)
+    except Exception as e:
+        print(f"❌ Model loading failed: {e}")
+        model = None
+        le = None
+        expected_features = ["T_peak", "F_peak", "width", "area"]
+else:
+    print(f"⚠️ Model file not found: {MODEL_PATH}")
     model = None
     le = None
+    expected_features = ["T_peak", "F_peak", "width", "area"]
 
-# --- 2. ฟังก์ชันสกัด Feature (เหมือนของเพื่อนคุณ) ---
+@app.get("/")
+def home():
+    return {
+        "message": "Orchid Species Prediction API is running!",
+        "model_loaded": model is not None
+    }
+
+# --- 2. Feature Extraction (identical to Colab) ---
 def extract_peak_features(t, f):
     mask = ~np.isnan(t) & ~np.isnan(f)
     t = np.asarray(t[mask])
     f = np.asarray(f[mask])
-    if len(t) < 3: return np.nan, np.nan, np.nan, np.nan
+    if len(t) < 3:
+        return np.nan, np.nan, np.nan, np.nan
 
     sort_idx = np.argsort(t)
     t = t[sort_idx]
@@ -59,7 +78,7 @@ def extract_peak_features(t, f):
     F_peak = float(f[peak_idx])
     T_peak = float(t[peak_idx])
 
-    # รองรับ numpy เวอร์ชันใหม่ (trapezoid) และเก่า (trapz)
+    # Compatibility with numpy versions
     if hasattr(np, 'trapezoid'):
         area = float(np.trapezoid(f, x=t))
     else:
@@ -73,92 +92,92 @@ def extract_peak_features(t, f):
         width = np.nan
     return T_peak, F_peak, width, area
 
-# --- 3. ฟังก์ชันดึงชื่อกลุ่ม (ใช้ตรรกะเดียวกับ finish_model.py) ---
-def get_species_group_name(col_name):
-    # ใช้ Regex ดึงเฉพาะตัวอักษรภาษาอังกฤษข้างหน้า
-    # เช่น "PtanalbaT1" -> "Ptanalba", "Csp015T3" -> "Csp"
-    m = re.match(r"^([A-Za-z]+)", str(col_name))
-    if m:
-        return m.group(1)
-    return "Unknown"
+# --- 3. T/F Pair Detection (identical to Colab) ---
+def find_tf_pairs(columns):
+    pairs = []
+    for col in columns:
+        m = re.match(r"^(.*)T(\d+)$", col)
+        if m:
+            prefix, rep = m.group(1), m.group(2)
+            t_col = col
+            f_col = f"{prefix}F{rep}"
+            if f_col in columns:
+                pairs.append((t_col, f_col))
+    return pairs
 
-# --- 4. ฟังก์ชันหลัก: จัดกลุ่มและเตรียมข้อมูล ---
-def process_file_and_group(df):
-    columns = df.columns.tolist()
-    all_features = []  # รวมฟีเจอร์ทั้งหมดจากทุกคอลัมน์
-
-    # วนลูปจับคู่ T และ F
-    for i in range(0, len(columns) - 1, 2):
-        t_col = columns[i]
-        f_col = columns[i+1]
-
-        t_vals = pd.to_numeric(df[t_col], errors='coerce').values
-        f_vals = pd.to_numeric(df[f_col], errors='coerce').values
-
-        T_peak, F_peak, width, area = extract_peak_features(t_vals, f_vals)
-
-        if not np.isnan(T_peak):
-            all_features.append([T_peak, F_peak, width, area])
-
-    return np.array(all_features)  # ส่งค่าเป็น Array 2D
-
+# --- 4. Main Prediction Endpoint ---
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
     try:
         if model is None:
-            return {"results": []}
+            return {"error": "Model not loaded", "results": []}
 
+        # Read uploaded Excel file
         contents = await file.read()
         df = pd.read_excel(io.BytesIO(contents))
+        print(f"📥 Received file with shape: {df.shape}")
 
-        # 1. ดึงฟีเจอร์ทั้งหมดจากไฟล์ (รวมทุกคอลัมน์ T/F ที่มี)
-        X_all = process_file_and_group(df)
+        # Find T/F pairs (e.g., PtanalbaT1 & PtanalbaF1)
+        tf_pairs = find_tf_pairs(df.columns.tolist())
+        if not tf_pairs:
+            return {"error": "No valid T/F column pairs found", "results": []}
 
-        # ตรวจสอบว่ามีข้อมูลให้ทำนายหรือไม่
-        if len(X_all) == 0:
-            return {"results": []}
+        # Extract features from ALL pairs
+        all_features = []
+        for t_col, f_col in tf_pairs:
+            t_vals = pd.to_numeric(df[t_col], errors='coerce').values
+            f_vals = pd.to_numeric(df[f_col], errors='coerce').values
+            T_peak, F_peak, width, area = extract_peak_features(t_vals, f_vals)
+            if not np.isnan(T_peak):
+                all_features.append([T_peak, F_peak, width, area])
 
-        # 2. ใช้โมเดลทำนายความน่าจะเป็นของทุกแถว
+        if not all_features:
+            return {"error": "No valid features extracted", "results": []}
+
+        # Convert to numpy array
+        X_all = np.array(all_features)
+        print(f"🧠 Extracted {len(all_features)} samples for prediction")
+
+        # Predict probabilities for all samples
         probs_all = model.predict_proba(X_all)
 
-        # 3. หาค่าเฉลี่ยของความน่าจะเป็นทั้งหมด (รวมทุกแถว)
+        # Average probabilities across all samples → single prediction
         avg_probs = np.mean(probs_all, axis=0)
 
-        # 4. หา Top 4 จากค่าเฉลี่ย
+        # Get top 4 predictions
         top_indices = np.argsort(avg_probs)[::-1][:4]
 
         top_4_data = []
-        max_score = 0.0
-
-        for k, idx in enumerate(top_indices):
-            pred_label_code = class_labels[idx]
+        max_score = 0
+        for rank, idx in enumerate(top_indices, start=1):
+            label_code = class_labels[idx]
             try:
-                species_name = le.inverse_transform([pred_label_code])[0]
-            except:
+                species_name = le.inverse_transform([label_code])[0]
+            except Exception:
                 species_name = "Unknown"
 
-            score = int(round(avg_probs[idx] * 100))
-            if k == 0:
-                max_score = score
+            confidence = int(round(avg_probs[idx] * 100))
+            if rank == 1:
+                max_score = confidence
 
-            if score >= 0:
-                display_text = f"{k + 1}. {species_name} {score}%"
-                top_4_data.append({
-                    "rank": k + 1,
-                    "species": display_text,
-                    "confidence": score
-                })
+            display_text = f"{rank}. {species_name} {confidence}%"
+            top_4_data.append({
+                "rank": rank,
+                "species": display_text,
+                "confidence": confidence
+            })
 
-        # 5. ส่งผลลัพธ์เป็นรายการเดียว (ไม่แบ่งกลุ่ม)
-        results = [{
-            "filename": "",  # ใช้ค่าว่างเพื่อซ่อนชื่อไฟล์ใน UI หากต้องการ
-            "group_real_name": "All Samples Combined",  # ระบุว่ารวมทุกอย่าง
+        # Return single result (not grouped)
+        result = {
+            "filename": file.filename,
+            "group_real_name": "Combined Prediction",
             "top_4_details": top_4_data,
             "sort_score": max_score
-        }]
+        }
 
-        return {"results": results}
+        return {"results": [result]}
 
     except Exception as e:
+        print("❌ Error during prediction:")
         print(traceback.format_exc())
-        return {"results": []}
+        return {"error": str(e), "results": []}
