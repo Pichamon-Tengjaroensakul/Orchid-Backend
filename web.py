@@ -7,23 +7,23 @@ Original file is located at
     https://colab.research.google.com/drive/1Wqn3L3or0Mk7hnHK6sjyqTuGO84hoX9o
 """
 
+# web.py
 from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 import pandas as pd
 import numpy as np
 import joblib
 import io
-import traceback
 import re
 import os
 
 app = FastAPI(
     title="Orchid Species Classifier API",
-    description="Predict orchid species from thermal-fluorescence data using Decision Tree",
-    version="1.0.1"
+    description="Predict orchid species from thermal-fluorescence data using Decision Tree (identical to Colab)",
+    version="1.1.0"
 )
 
-# Allow all origins (adjust for production)
+# Allow all origins
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -46,11 +46,8 @@ if os.path.exists(MODEL_PATH):
         le = artifacts["label_encoder"]
         class_labels = model.classes_
         print("✅ Model loaded successfully.")
-        print("Number of classes:", len(class_labels))
     except Exception as e:
         print(f"❌ Model loading failed: {e}")
-        model = None
-        le = None
 else:
     print(f"⚠️ Model file not found: {MODEL_PATH}")
 
@@ -77,7 +74,7 @@ def extract_peak_features(t, f):
     F_peak = float(f[peak_idx])
     T_peak = float(t[peak_idx])
 
-    # Use np.trapz to match Colab exactly
+    # ✅ ใช้ np.trapz เหมือน Colab ต้นฉบับ (ไม่ใช้ trapezoid)
     area = float(np.trapz(f, t))
 
     half = F_peak / 2.0
@@ -156,7 +153,6 @@ async def predict(file: UploadFile = File(...)):
                 max_score = confidence
 
             top_4_sum += confidence
-
             display_text = f"{rank}. {species_name} {confidence}%"
             top_4_data.append({
                 "rank": rank,
@@ -177,13 +173,12 @@ async def predict(file: UploadFile = File(...)):
         result = {
             "filename": file.filename,
             "group_real_name": "Combined Prediction",
-            "top_4_details": top_4_data,  # จริงๆ ตอนนี้มี 5 รายการ
+            "top_4_details": top_4_data,
             "sort_score": max_score
         }
 
         return {"results": [result]}
 
     except Exception as e:
-        print("❌ Error during prediction:")
-        print(traceback.format_exc())
+        print(f"❌ Error during prediction: {e}")
         return {"error": str(e), "results": []}
