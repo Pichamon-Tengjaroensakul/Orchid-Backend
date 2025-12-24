@@ -85,15 +85,12 @@ def get_species_group_name(col_name):
 # --- 4. ฟังก์ชันหลัก: จัดกลุ่มและเตรียมข้อมูล ---
 def process_file_and_group(df):
     columns = df.columns.tolist()
-    grouped_data = defaultdict(list)
+    all_features = []  # รวมฟีเจอร์ทั้งหมดจากทุกคอลัมน์
 
     # วนลูปจับคู่ T และ F
     for i in range(0, len(columns) - 1, 2):
         t_col = columns[i]
         f_col = columns[i+1]
-
-        # ดึงชื่อกลุ่ม (เช่น Ptanalba)
-        group_name = get_species_group_name(t_col)
 
         t_vals = pd.to_numeric(df[t_col], errors='coerce').values
         f_vals = pd.to_numeric(df[f_col], errors='coerce').values
@@ -101,73 +98,65 @@ def process_file_and_group(df):
         T_peak, F_peak, width, area = extract_peak_features(t_vals, f_vals)
 
         if not np.isnan(T_peak):
-            # เก็บค่าฟีเจอร์ลงในกลุ่มนั้นๆ
-            grouped_data[group_name].append([T_peak, F_peak, width, area])
+            all_features.append([T_peak, F_peak, width, area])
 
-    return grouped_data
+    return np.array(all_features)  # ส่งค่าเป็น Array 2D
 
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
     try:
-        if model is None: return {"results": []}
+        if model is None:
+            return {"results": []}
 
         contents = await file.read()
         df = pd.read_excel(io.BytesIO(contents))
 
-        # 1. จัดกลุ่มข้อมูล (Group Similar Names)
-        grouped_features = process_file_and_group(df)
+        # 1. ดึงฟีเจอร์ทั้งหมดจากไฟล์ (รวมทุกคอลัมน์ T/F ที่มี)
+        X_all = process_file_and_group(df)
 
-        if not grouped_features: return {"results": []}
+        # ตรวจสอบว่ามีข้อมูลให้ทำนายหรือไม่
+        if len(X_all) == 0:
+            return {"results": []}
 
-        results = []
+        # 2. ใช้โมเดลทำนายความน่าจะเป็นของทุกแถว
+        probs_all = model.predict_proba(X_all)
 
-        # 2. วิเคราะห์ทีละกลุ่ม (Combine & Analyze)
-        for group_name, features_list in grouped_features.items():
-            # แปลงข้อมูลทั้งหมดในกลุ่มเป็น Array เดียว
-            X_group = np.array(features_list)
+        # 3. หาค่าเฉลี่ยของความน่าจะเป็นทั้งหมด (รวมทุกแถว)
+        avg_probs = np.mean(probs_all, axis=0)
 
-            # ให้ Model ทำนายความน่าจะเป็นของทุกเส้นในกลุ่มนี้
-            probs_group = model.predict_proba(X_group)
+        # 4. หา Top 4 จากค่าเฉลี่ย
+        top_indices = np.argsort(avg_probs)[::-1][:4]
 
-            # *** รวมผลลัพธ์: หาค่าเฉลี่ยความน่าจะเป็นของทั้งกลุ่ม ***
-            # นี่คือขั้นตอนที่ยุบหลาย Sample ให้เหลือผลลัพธ์เดียว
-            avg_probs = np.mean(probs_group, axis=0)
+        top_4_data = []
+        max_score = 0.0
 
-            # หา Top 4 จากค่าเฉลี่ย
-            top_indices = np.argsort(avg_probs)[::-1][:4]
+        for k, idx in enumerate(top_indices):
+            pred_label_code = class_labels[idx]
+            try:
+                species_name = le.inverse_transform([pred_label_code])[0]
+            except:
+                species_name = "Unknown"
 
-            top_4_data = []
-            max_score = 0.0
+            score = int(round(avg_probs[idx] * 100))
+            if k == 0:
+                max_score = score
 
-            # สร้างข้อความผลลัพธ์ (List 1-4)
-            for k, idx in enumerate(top_indices):
-                pred_label_code = class_labels[idx]
-                try:
-                    species_name = le.inverse_transform([pred_label_code])[0]
-                except:
-                    species_name = "Unknown"
+            if score >= 0:
+                display_text = f"{k + 1}. {species_name} {score}%"
+                top_4_data.append({
+                    "rank": k + 1,
+                    "species": display_text,
+                    "confidence": score
+                })
 
-                score = int(round(avg_probs[idx] * 100))
-                if k == 0: max_score = score
+        # 5. ส่งผลลัพธ์เป็นรายการเดียว (ไม่แบ่งกลุ่ม)
+        results = [{
+            "filename": "",  # ใช้ค่าว่างเพื่อซ่อนชื่อไฟล์ใน UI หากต้องการ
+            "group_real_name": "All Samples Combined",  # ระบุว่ารวมทุกอย่าง
+            "top_4_details": top_4_data,
+            "sort_score": max_score
+        }]
 
-                if score >= 0:
-                    display_text = f"{k + 1}. {species_name} {score}%"
-                    top_4_data.append({
-                        "rank": k + 1,
-                        "species": display_text,
-                        "confidence": score
-                    })
-
-            results.append({
-                # ส่งค่าว่างไปที่ filename เพื่อซ่อนชื่อกลุ่มในหน้าเว็บ (Trick)
-                "filename": "",
-                "group_real_name": group_name,
-                "top_4_details": top_4_data,
-                "sort_score": max_score
-            })
-
-        # เรียงลำดับบรรทัดตามคะแนนความมั่นใจ
-        results.sort(key=lambda x: x["sort_score"], reverse=True)
         return {"results": results}
 
     except Exception as e:
