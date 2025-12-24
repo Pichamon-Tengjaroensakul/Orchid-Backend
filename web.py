@@ -14,7 +14,8 @@ import numpy as np
 import joblib
 import io
 import traceback
-import re # เพิ่มตัวช่วยจัดการตัวอักษร
+import re
+from collections import defaultdict
 
 app = FastAPI()
 
@@ -30,7 +31,6 @@ app.add_middleware(
 def home():
     return {"message": "Orchid API is running!"}
 
-# --- โหลดโมเดล ---
 try:
     artifacts = joblib.load("orchid_decision_tree_v1.pkl")
     model = artifacts["model"]
@@ -70,35 +70,28 @@ def extract_peak_features(t, f):
         width = np.nan
     return T_peak, F_peak, width, area
 
-def process_file(df):
+def process_file_and_group(df):
     columns = df.columns.tolist()
-    features = []
+    grouped_data = defaultdict(list)
 
     for i in range(0, len(columns) - 1, 2):
         t_col = columns[i]
         f_col = columns[i+1]
 
-        # --- จุดแก้ไขที่ 1: ดึงชื่อจากหัวตารางมาทำเป็น Sample ID ---
-        # ลบคำว่า "T" ออกจากชื่อคอลัมน์ เพื่อให้ได้ชื่อแบบที่คุณต้องการ (PtanalbaT1 -> Ptanalba1)
-        # ใช้ regex เพื่อลบ T ที่อยู่ติดกับตัวเลข หรือ T ท้ายสุด
-        raw_name = str(t_col)
-        sample_name = raw_name.replace("T", "").replace("F", "") # แบบง่าย: ลบ T ทิ้งเลย
-
-        # หรือถ้าอยากให้ชัวร์ว่าลบเฉพาะ T ที่เป็น suffix (เช่น CvesT1 -> Cves1)
-        # sample_name = re.sub(r'T(\d+)$', r'\1', raw_name)
-        # แต่จากไฟล์ของคุณ ใช้แบบ replace ง่ายๆ ก็น่าจะครอบคลุมครับ
-        # --------------------------------------------------------
+        # ตัดตัวเลขท้ายชื่อออก เพื่อจัดกลุ่ม (เช่น PtanalbaT1 -> Ptanalba)
+        col_name_str = str(t_col)
+        group_name = re.sub(r'[TF][0-9.]+$', '', col_name_str)
+        if not group_name: group_name = col_name_str
 
         t_vals = pd.to_numeric(df[t_col], errors='coerce').values
         f_vals = pd.to_numeric(df[f_col], errors='coerce').values
+
         T_peak, F_peak, width, area = extract_peak_features(t_vals, f_vals)
 
         if not np.isnan(T_peak):
-            features.append({
-                "sample_id": sample_name, # เก็บชื่อนี้ไว้ส่งกลับ
-                "T_peak": T_peak, "F_peak": F_peak, "Width_FWHM": width, "Area": area
-            })
-    return pd.DataFrame(features)
+            grouped_data[group_name].append([T_peak, F_peak, width, area])
+
+    return grouped_data
 
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
@@ -107,20 +100,18 @@ async def predict(file: UploadFile = File(...)):
 
         contents = await file.read()
         df = pd.read_excel(io.BytesIO(contents))
-        processed_df = process_file(df)
 
-        if processed_df.empty: return {"results": []}
-
-        X = processed_df[feat_cols].to_numpy()
-        probabilities = model.predict_proba(X)
+        grouped_features = process_file_and_group(df)
+        if not grouped_features: return {"results": []}
 
         results = []
-        for i in range(len(processed_df)):
-            probs = probabilities[i]
-            top_indices = np.argsort(probs)[::-1][:4]
+        for group_name, features_list in grouped_features.items():
+            X_group = np.array(features_list)
+            probs_group = model.predict_proba(X_group)
+            avg_probs = np.mean(probs_group, axis=0) # หาค่าเฉลี่ยความมั่นใจของกลุ่ม
 
-            # ดึงชื่อ Sample ID ที่เราเตรียมไว้ (เช่น Ptanalba1)
-            current_sample_id = processed_df.iloc[i]["sample_id"]
+            # เรียงลำดับจากมากไปน้อย
+            top_indices = np.argsort(avg_probs)[::-1][:4]
 
             top_4_data = []
             max_score = 0.0
@@ -130,31 +121,26 @@ async def predict(file: UploadFile = File(...)):
                 try:
                     species_name = le.inverse_transform([pred_label_code])[0]
                 except:
-                    species_name = f"Unknown"
+                    species_name = "Unknown"
 
-                score = float(probs[idx] * 100)
+                score = float(avg_probs[idx] * 100)
                 if k == 0: max_score = score
 
                 if score > 0:
                     top_4_data.append({
                         "rank": k + 1,
-                        "species": species_name, # นี่คือชื่อที่ AI ทาย (เช่น Ptanalba)
-                        "confidence": score
+                        "species": species_name,
+                        "confidence": int(round(score)) # ปัดเศษเป็นจำนวนเต็มตามตัวอย่าง (70%)
                     })
 
             results.append({
-                # --- จุดแก้ไขที่ 2: ส่งชื่อ sample_id กลับไปในช่อง filename ---
-                "filename": current_sample_id,
-                # -------------------------------------------------------
+                "filename": group_name,
                 "top_4_details": top_4_data,
                 "sort_score": max_score
             })
 
-        # เรียงลำดับตามความมั่นใจจากมากไปน้อย
         results.sort(key=lambda x: x["sort_score"], reverse=True)
-
-        # ส่งกลับแค่ 4 ตัวที่ดีที่สุด
-        return {"results": results[:4]}
+        return {"results": results}
 
     except Exception as e:
         print(traceback.format_exc())
