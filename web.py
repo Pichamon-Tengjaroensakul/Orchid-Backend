@@ -19,10 +19,11 @@ import os
 
 app = FastAPI(
     title="Orchid Species Classifier API",
-    description="Predict orchid species using the exact same logic as the original Colab",
-    version="1.0.1"
+    description="Predict orchid species from thermal-fluorescence data using Decision Tree",
+    version="1.0.0"
 )
 
+# Allow all origins (adjust for production)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -31,7 +32,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- Load Model ---
+# --- 1. Load Model ---
 MODEL_PATH = "orchid_decision_tree_v1.pkl"
 
 model = None
@@ -43,56 +44,55 @@ if os.path.exists(MODEL_PATH):
         artifacts = joblib.load(MODEL_PATH)
         model = artifacts["model"]
         le = artifacts["label_encoder"]
+        # ❌ ไม่ต้องใช้ expected_features ในการตรวจสอบ — เพราะ sklearn ไม่ดูชื่อคอลัมน์
         class_labels = model.classes_
         print("✅ Model loaded successfully.")
-        print(f"Total classes: {len(class_labels)}")
+        print("Number of classes:", len(class_labels))
     except Exception as e:
         print(f"❌ Model loading failed: {e}")
         model = None
+        le = None
 else:
     print(f"⚠️ Model file not found: {MODEL_PATH}")
 
 @app.get("/")
 def home():
     return {
-        "message": "Orchid API is running!",
+        "message": "Orchid Species Prediction API is running!",
         "model_loaded": model is not None
     }
 
-# --- EXACT SAME FEATURE EXTRACTION AS COLAB ---
+# --- 2. Feature Extraction (identical to Colab) ---
 def extract_peak_features(t, f):
-    """Identical to the Colab version — uses np.trapz, same NaN handling"""
     mask = ~np.isnan(t) & ~np.isnan(f)
     t = np.asarray(t[mask])
     f = np.asarray(f[mask])
-
     if len(t) < 3:
         return np.nan, np.nan, np.nan, np.nan
 
-    # Sort by temperature
     sort_idx = np.argsort(t)
     t = t[sort_idx]
     f = f[sort_idx]
 
-    # Peak detection
     peak_idx = np.argmax(f)
     F_peak = float(f[peak_idx])
     T_peak = float(t[peak_idx])
 
-    # Area under curve — USE np.trapz (NOT trapezoid)
-    area = float(np.trapz(f, t))
+    # Compatibility with numpy versions
+    if hasattr(np, 'trapezoid'):
+        area = float(np.trapezoid(f, x=t))
+    else:
+        area = float(np.trapz(f, t))
 
-    # Full Width at Half Maximum (FWHM)
     half = F_peak / 2.0
     above_half = np.where(f >= half)[0]
     if len(above_half) >= 2:
         width = float(t[above_half[-1]] - t[above_half[0]])
     else:
         width = np.nan
-
     return T_peak, F_peak, width, area
 
-# --- EXACT SAME T/F PAIR DETECTION AS COLAB ---
+# --- 3. T/F Pair Detection (identical to Colab) ---
 def find_tf_pairs(columns):
     pairs = []
     for col in columns:
@@ -105,40 +105,42 @@ def find_tf_pairs(columns):
                 pairs.append((t_col, f_col))
     return pairs
 
-# --- Prediction Endpoint ---
+# --- 4. Main Prediction Endpoint ---
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
     try:
         if model is None:
             return {"error": "Model not loaded", "results": []}
 
-        # Read file
+        # Read uploaded Excel file
         contents = await file.read()
         df = pd.read_excel(io.BytesIO(contents))
-        print(f"📥 File received: {df.shape}")
+        print(f"📥 Received file with shape: {df.shape}")
 
         # Find T/F pairs
         tf_pairs = find_tf_pairs(df.columns.tolist())
         if not tf_pairs:
             return {"error": "No valid T/F column pairs found", "results": []}
 
-        # Extract features EXACTLY like Colab
+        # Extract features from ALL pairs — in the SAME ORDER as training!
         all_features = []
         for t_col, f_col in tf_pairs:
             t_vals = pd.to_numeric(df[t_col], errors='coerce').values
             f_vals = pd.to_numeric(df[f_col], errors='coerce').values
             T_peak, F_peak, width, area = extract_peak_features(t_vals, f_vals)
             if not np.isnan(T_peak):
-                # Important: Keep order [T_peak, F_peak, width, area]
+                # ⚠️ ส่งในลำดับนี้: [T_peak, F_peak, width, area]
+                # ซึ่งต้องตรงกับตอนเทรนใน Colab: [T_peak, F_peak, Width_FWHM, Area]
                 all_features.append([T_peak, F_peak, width, area])
 
         if not all_features:
             return {"error": "No valid features extracted", "results": []}
 
         X_all = np.array(all_features)
-        print(f"🧠 Input shape: {X_all.shape}")
+        print(f"🧠 Input shape: {X_all.shape} (should be (N, 4))")
 
-        # Predict — no feature name validation (sklearn doesn't need it)
+        # 🔥 ไม่ต้องตรวจสอบชื่อฟีเจอร์ — ใช้ค่าตรงๆ
+        # sklearn DecisionTree ใช้แค่ลำดับ (0,1,2,3)
         probs_all = model.predict_proba(X_all)
         avg_probs = np.mean(probs_all, axis=0)
 
@@ -175,6 +177,6 @@ async def predict(file: UploadFile = File(...)):
         return {"results": [result]}
 
     except Exception as e:
-        print("❌ Prediction error:")
+        print("❌ Error during prediction:")
         print(traceback.format_exc())
         return {"error": str(e), "results": []}
