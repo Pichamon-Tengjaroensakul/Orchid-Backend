@@ -12,13 +12,13 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 import pandas as pd
 import numpy as np
-import joblib
 import os
 import re
 import io
 
 app = FastAPI()
 
+# ตั้งค่า CORS ให้เว็บไซต์เชื่อมต่อได้
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -28,47 +28,30 @@ app.add_middleware(
 )
 
 # ==========================================
-# 1. โหลดโมเดล
-# ==========================================
-# ⚠️ ตรวจสอบให้แน่ใจว่าไฟล์บน GitHub ชื่อนี้ และเป็นไฟล์ .pkl ของจริง (ไม่ใช่ .py)
-MODEL_PATH = os.path.join(os.path.dirname(__file__), 'orchid_decision_tree_v1.pkl')
-model_data = None
-
-try:
-    if os.path.exists(MODEL_PATH):
-        model_data = joblib.load(MODEL_PATH)
-        print(f"✅ โหลดโมเดลสำเร็จ: {MODEL_PATH}")
-    else:
-        # ลองหาไฟล์ชื่ออื่นเผื่อไว้ (เช่น orchid_model_final.pkl)
-        ALT_PATH = os.path.join(os.path.dirname(__file__), 'orchid_model_final.pkl')
-        if os.path.exists(ALT_PATH):
-            model_data = joblib.load(ALT_PATH)
-            print(f"✅ โหลดโมเดลสำรองสำเร็จ: {ALT_PATH}")
-        else:
-            print(f"❌ หาไฟล์โมเดลไม่เจอทั้ง {MODEL_PATH} และ {ALT_PATH}")
-except Exception as e:
-    print(f"❌ Error loading model: {e}")
-
-# ==========================================
-# 2. ฟังก์ชันคำนวณ Feature
+# 1. ฟังก์ชันคำนวณ Feature (หัวใจหลัก)
 # ==========================================
 def extract_peak_features(t, f):
     try:
+        # กรองค่าว่าง (NaN)
         mask = ~np.isnan(t) & ~np.isnan(f)
         t, f = np.asarray(t[mask]), np.asarray(f[mask])
 
         if len(t) < 3: return np.nan, np.nan, np.nan, np.nan
 
+        # เรียงลำดับข้อมูล
         sort_idx = np.argsort(t)
         t, f = t[sort_idx], f[sort_idx]
 
+        # 1. หาจุดยอด (Peak)
         peak_idx = np.argmax(f)
         F_peak = float(f[peak_idx])
         T_peak = float(t[peak_idx])
 
+        # 2. หาพื้นที่ใต้กราฟ (Area)
         if hasattr(np, 'trapezoid'): area = float(np.trapezoid(f, x=t))
         else: area = float(np.trapz(f, t))
 
+        # 3. หาความกว้าง (FWHM)
         half = F_peak / 2.0
         above_half = np.where(f >= half)[0]
         if len(above_half) >= 2:
@@ -80,18 +63,16 @@ def extract_peak_features(t, f):
         return np.nan, np.nan, np.nan, np.nan
 
 # ==========================================
-# 3. API Endpoints
+# 2. API Endpoints
 # ==========================================
 @app.get("/")
 def home():
-    return {"message": "Orchid AI Backend is Running!"}
+    return {"message": "Feature Extraction API is Running!"}
 
-@app.post("/predict") # 👈 เปลี่ยนเป็น /predict ตามที่คุยกันก่อนหน้า
+@app.post("/predict")
 async def predict(file: UploadFile = File(...)):
-    if not model_data:
-        raise HTTPException(status_code=500, detail="Model not loaded on server. Please upload .pkl file to GitHub.")
-
     try:
+        # อ่านไฟล์ Excel จาก Memory
         contents = await file.read()
         df = pd.read_excel(io.BytesIO(contents))
 
@@ -99,28 +80,25 @@ async def predict(file: UploadFile = File(...)):
         columns = df.columns.tolist()
         processed_pairs = set()
 
-        # --- กรณีที่ 1: ไฟล์มีแค่คอลัมน์ T และ F (เหมือนไฟล์ที่คุณแนบมา) ---
+        # --- กรณีที่ 1: ไฟล์มีแค่คอลัมน์ T และ F (เหมือนไฟล์ตัวอย่าง) ---
         if 'T' in columns and 'F' in columns:
             t_vals = pd.to_numeric(df['T'], errors='coerce').values
             f_vals = pd.to_numeric(df['F'], errors='coerce').values
 
+            # คำนวณ Feature
             T_peak, F_peak, width, area = extract_peak_features(t_vals, f_vals)
 
             if not np.isnan(T_peak):
-                features = pd.DataFrame([[T_peak, F_peak, width, area]],
-                                      columns=["T_peak", "F_peak", "Width_FWHM", "Area"])
-
-                pred_idx = model_data["model"].predict(features)[0]
-                pred_name = model_data["label_encoder"].inverse_transform([pred_idx])[0]
-
                 results.append({
                     "sample_id": "Uploaded-Sample",
                     "T_peak": round(T_peak, 2),
                     "F_peak": round(F_peak, 4),
-                    "predicted_species": pred_name
+                    "Width_FWHM": round(width, 4),
+                    "Area": round(area, 4)
+                    # ❌ ไม่ส่งค่า predicted_species
                 })
 
-        # --- กรณีที่ 2: ไฟล์มีหลายคอลัมน์ เช่น PtanalbaT1, PtanalbaF1 ---
+        # --- กรณีที่ 2: ไฟล์มีหลายคอลัมน์ (เช่น SampleT1, SampleF1) ---
         for col in columns:
             m = re.match(r"^(.*)T(\d+)$", str(col))
             if m:
@@ -136,21 +114,16 @@ async def predict(file: UploadFile = File(...)):
                     T_peak, F_peak, width, area = extract_peak_features(t_vals, f_vals)
 
                     if not np.isnan(T_peak):
-                        features = pd.DataFrame([[T_peak, F_peak, width, area]],
-                                              columns=["T_peak", "F_peak", "Width_FWHM", "Area"])
-
-                        pred_idx = model_data["model"].predict(features)[0]
-                        pred_name = model_data["label_encoder"].inverse_transform([pred_idx])[0]
-
                         results.append({
                             "sample_id": f"{prefix}-{num}",
                             "T_peak": round(T_peak, 2),
                             "F_peak": round(F_peak, 4),
-                            "predicted_species": pred_name
+                            "Width_FWHM": round(width, 4),
+                            "Area": round(area, 4)
                         })
 
         if not results:
-             return {"success": False, "message": "No valid data found in columns 'T', 'F' or '...T1', '...F1'"}
+             return {"success": False, "message": "No valid data found in file."}
 
         return {"success": True, "results": results}
 
