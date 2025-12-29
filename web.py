@@ -19,34 +19,38 @@ import io
 
 app = FastAPI()
 
-# ==========================================
-# 1. ตั้งค่า CORS (สำคัญมากสำหรับ Lovable/Vercel)
-# ==========================================
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # อนุญาตให้ทุกเว็บเรียกใช้ (หรือจะระบุโดเมนเจาะจงก็ได้)
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # ==========================================
-# 2. โหลดโมเดล
+# 1. โหลดโมเดล
 # ==========================================
-MODEL_PATH = os.path.join(os.path.dirname(__file__), 'orchid_model_final.pkl')
+# ⚠️ ตรวจสอบให้แน่ใจว่าไฟล์บน GitHub ชื่อนี้ และเป็นไฟล์ .pkl ของจริง (ไม่ใช่ .py)
+MODEL_PATH = os.path.join(os.path.dirname(__file__), 'orchid_decision_tree_v1.pkl')
 model_data = None
 
 try:
     if os.path.exists(MODEL_PATH):
         model_data = joblib.load(MODEL_PATH)
-        print("✅ โหลดโมเดลสำเร็จ!")
+        print(f"✅ โหลดโมเดลสำเร็จ: {MODEL_PATH}")
     else:
-        print(f"❌ หาไฟล์โมเดลไม่เจอที่: {MODEL_PATH}")
+        # ลองหาไฟล์ชื่ออื่นเผื่อไว้ (เช่น orchid_model_final.pkl)
+        ALT_PATH = os.path.join(os.path.dirname(__file__), 'orchid_model_final.pkl')
+        if os.path.exists(ALT_PATH):
+            model_data = joblib.load(ALT_PATH)
+            print(f"✅ โหลดโมเดลสำรองสำเร็จ: {ALT_PATH}")
+        else:
+            print(f"❌ หาไฟล์โมเดลไม่เจอทั้ง {MODEL_PATH} และ {ALT_PATH}")
 except Exception as e:
     print(f"❌ Error loading model: {e}")
 
 # ==========================================
-# 3. ฟังก์ชันคำนวณ Feature (Logic เดิม)
+# 2. ฟังก์ชันคำนวณ Feature
 # ==========================================
 def extract_peak_features(t, f):
     try:
@@ -76,24 +80,18 @@ def extract_peak_features(t, f):
         return np.nan, np.nan, np.nan, np.nan
 
 # ==========================================
-# 4. สร้าง API Endpoints
+# 3. API Endpoints
 # ==========================================
 @app.get("/")
 def home():
-    return {"message": "Orchid AI Backend (FastAPI) is Running! 🚀"}
+    return {"message": "Orchid AI Backend is Running!"}
 
-@app.post("/api/predict")
+@app.post("/predict") # 👈 เปลี่ยนเป็น /predict ตามที่คุยกันก่อนหน้า
 async def predict(file: UploadFile = File(...)):
-    # เช็คว่าโมเดลโหลดติดไหม
     if not model_data:
-        raise HTTPException(status_code=500, detail="Model not loaded on server")
-
-    # เช็คชนิดไฟล์ (Optional)
-    if not file.filename.endswith(('.xlsx', '.xls')):
-        raise HTTPException(status_code=400, detail="Invalid file format. Please upload .xlsx file")
+        raise HTTPException(status_code=500, detail="Model not loaded on server. Please upload .pkl file to GitHub.")
 
     try:
-        # อ่านไฟล์ (FastAPI อ่านเป็น Bytes ต้องแปลงด้วย io.BytesIO)
         contents = await file.read()
         df = pd.read_excel(io.BytesIO(contents))
 
@@ -101,6 +99,28 @@ async def predict(file: UploadFile = File(...)):
         columns = df.columns.tolist()
         processed_pairs = set()
 
+        # --- กรณีที่ 1: ไฟล์มีแค่คอลัมน์ T และ F (เหมือนไฟล์ที่คุณแนบมา) ---
+        if 'T' in columns and 'F' in columns:
+            t_vals = pd.to_numeric(df['T'], errors='coerce').values
+            f_vals = pd.to_numeric(df['F'], errors='coerce').values
+
+            T_peak, F_peak, width, area = extract_peak_features(t_vals, f_vals)
+
+            if not np.isnan(T_peak):
+                features = pd.DataFrame([[T_peak, F_peak, width, area]],
+                                      columns=["T_peak", "F_peak", "Width_FWHM", "Area"])
+
+                pred_idx = model_data["model"].predict(features)[0]
+                pred_name = model_data["label_encoder"].inverse_transform([pred_idx])[0]
+
+                results.append({
+                    "sample_id": "Uploaded-Sample",
+                    "T_peak": round(T_peak, 2),
+                    "F_peak": round(F_peak, 4),
+                    "predicted_species": pred_name
+                })
+
+        # --- กรณีที่ 2: ไฟล์มีหลายคอลัมน์ เช่น PtanalbaT1, PtanalbaF1 ---
         for col in columns:
             m = re.match(r"^(.*)T(\d+)$", str(col))
             if m:
@@ -129,12 +149,14 @@ async def predict(file: UploadFile = File(...)):
                             "predicted_species": pred_name
                         })
 
+        if not results:
+             return {"success": False, "message": "No valid data found in columns 'T', 'F' or '...T1', '...F1'"}
+
         return {"success": True, "results": results}
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# สำหรับรันในเครื่อง (ถ้า deploy บน Render ไม่ต้องใช้ส่วนนี้ก็ได้ เพราะ Render ใช้คำสั่ง start)
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8000))
     uvicorn.run(app, host='0.0.0.0', port=port)
