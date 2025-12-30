@@ -18,9 +18,9 @@ import os
 import re
 import io
 import base64
-import glob  # เพิ่มตัวนี้เพื่อค้นหาไฟล์
+import glob  # ใช้สำหรับค้นหาไฟล์อัตโนมัติ
 import matplotlib
-matplotlib.use('Agg')
+matplotlib.use('Agg') # ใช้ Backend แบบไม่แสดงหน้าต่าง
 import matplotlib.pyplot as plt
 
 app = FastAPI()
@@ -48,20 +48,27 @@ try:
         model_data = joblib.load(MODEL_PATH)
         print(f"✅ Model Loaded")
     else:
-        print(f"❌ Model Not Found")
+        print(f"❌ Model Not Found at {MODEL_PATH}")
 except Exception as e:
     print(f"❌ Error loading model: {e}")
 
-# 1.2 Load Reference Data (แบบบังคับหาไฟล์ให้เจอ)
+# 1.2 Load Reference Data (PROJECT_DATA.xlsx)
+# ใช้ glob เพื่อค้นหาไฟล์ .xlsx ในโฟลเดอร์เดียวกัน โดยไม่สนชื่อไฟล์ว่าพิมพ์เล็ก/ใหญ่
 try:
     current_dir = os.path.dirname(__file__)
-    # ค้นหาไฟล์ .xlsx หรือ .csv ทั้งหมดในโฟลเดอร์
+    # ค้นหาไฟล์ Excel ทั้งหมด
     excel_files = glob.glob(os.path.join(current_dir, "*.xlsx"))
     csv_files = glob.glob(os.path.join(current_dir, "*.csv"))
 
+    # เลือกไฟล์ PROJECT_DATA ถ้ามี หรือเอาไฟล์แรกที่เจอ
     found_file = None
-    if excel_files:
-        found_file = excel_files[0] # เอาไฟล์แรกที่เจอเลย
+    target_name = "PROJECT_DATA.xlsx"
+
+    # พยายามหาไฟล์ที่ชื่อตรงเป๊ะก่อน
+    if os.path.exists(os.path.join(current_dir, target_name)):
+        found_file = os.path.join(current_dir, target_name)
+    elif excel_files:
+        found_file = excel_files[0] # ถ้าไม่เจอชื่อเป๊ะ เอาไฟล์ Excel ไฟล์แรกที่เจอ
     elif csv_files:
         found_file = csv_files[0]
 
@@ -72,12 +79,12 @@ try:
         else:
             ref_df = pd.read_excel(found_file)
 
-        # Cleaning column names
+        # Cleaning: ตัดช่องว่างหัวท้ายชื่อคอลัมน์
         ref_df.columns = ref_df.columns.str.strip()
         print(f"✅ Reference Data Loaded: {len(ref_df)} rows")
     else:
-        print(f"❌ CRITICAL ERROR: No Excel/CSV file found in {current_dir}")
-        print("Please ensure PROJECT_DATA.xlsx is uploaded to GitHub.")
+        print(f"❌ CRITICAL: No Reference File Found in {current_dir}")
+        print("   Please upload PROJECT_DATA.xlsx to GitHub.")
 
 except Exception as e:
     print(f"❌ Error loading reference data: {e}")
@@ -107,71 +114,82 @@ def extract_peak_features(t, f):
 
 def generate_plot_base64(user_t, user_f, species_name):
     """
-    วาดกราฟแบบเดียวกับที่แสดงให้คุณดู:
-    - พื้นหลัง: เส้นกราฟอ้างอิงทั้งหมด (สีแดงจางๆ)
-    - ด้านหน้า: เส้นกราฟผู้ใช้ (สีดำหนา)
+    วาดกราฟเปรียบเทียบ:
+    1. วาดเส้น Reference ทั้งหมดที่เกี่ยวข้อง (สีแดงจางๆ)
+    2. วาดเส้น User Data (สีดำหนา) ทับด้านบน
     """
     try:
-        plt.figure(figsize=(9, 6))
+        plt.figure(figsize=(10, 6))
 
-        # --- ส่วนที่ 1: วาดเส้น Reference (ถ้ามีข้อมูล) ---
         has_ref = False
-        if ref_df is not None:
-            # แปลงชื่อสายพันธุ์ให้เป็นคำค้นหา (เช่น PtanalbaT -> ptanalba)
-            target = species_name.strip()
-            if target.endswith('T') or target.endswith('t'):
-                target = target[:-1]
-            if target.lower().endswith('sp'):
-                 target = target.lower().replace('sp', '').strip()
 
-            # สร้าง Regex Pattern เพื่อค้นหาคอลัมน์ทั้งหมด (เช่น PtanalbaT1, PtanalbaT2...)
-            # ค้นหาแบบ Case Insensitive
-            import re
-            pattern = re.compile(f"^{re.escape(target)}T\\d+$", re.IGNORECASE)
+        # --- 1. วาดเส้น Reference (Background) ---
+        if ref_df is not None:
+            # เตรียมคำค้นหา: ตัด sp, ตัด T ท้ายคำ
+            # ตัวอย่าง: "PtanalbaT" -> "Ptanalba"
+            target_species = species_name.strip()
+            if target_species.endswith('T') or target_species.endswith('t'):
+                target_species = target_species[:-1]
+            if target_species.lower().endswith('sp'):
+                target_species = target_species.lower().replace('sp', '').strip()
+
+            print(f"Plotting references for: {target_species}")
+
+            # ใช้ Regex ค้นหาคอลัมน์ทั้งหมดที่ขึ้นต้นด้วยชื่อสายพันธุ์ และตามด้วย T + ตัวเลข
+            # เช่น PtanalbaT1, PtanalbaT2, ...
+            pattern = re.compile(f"^{re.escape(target_species)}T\\d+$", re.IGNORECASE)
 
             cols = ref_df.columns
-            # หาคู่ T, F ทั้งหมดที่ตรงกับชื่อสายพันธุ์
+            ref_pairs = []
+
+            # วนลูปหาคู่ T, F ทั้งหมด
             for col in cols:
                 if pattern.match(col):
-                    # เจอคอลัมน์ T (เช่น PtanalbaT1) -> หาคอลัมน์ F คู่กัน
+                    # เจอคอลัมน์ T -> หาคอลัมน์ F คู่กัน
                     is_upper = 'T' in col
                     last_t_idx = col.rfind('T') if is_upper else col.rfind('t')
                     col_f = col[:last_t_idx] + ('F' if is_upper else 'f') + col[last_t_idx+1:]
 
                     if col_f in cols:
-                        # ดึงข้อมูลและวาดเส้น
-                        r_t = pd.to_numeric(ref_df[col], errors='coerce')
-                        r_f = pd.to_numeric(ref_df[col_f], errors='coerce')
+                        ref_pairs.append((col, col_f))
 
-                        mask = ~np.isnan(r_t) & ~np.isnan(r_f)
-                        r_t, r_f = r_t[mask], r_f[mask]
+            # วาดเส้นทุกคู่ที่เจอ
+            for t_col, f_col in ref_pairs:
+                r_t = pd.to_numeric(ref_df[t_col], errors='coerce')
+                r_f = pd.to_numeric(ref_df[f_col], errors='coerce')
 
-                        if len(r_t) > 0:
-                            sort_idx = np.argsort(r_t)
-                            # เส้นสีแดงจางๆ
-                            plt.plot(r_t.iloc[sort_idx], r_f.iloc[sort_idx],
-                                     color='#ff3333', linestyle='--', linewidth=1, alpha=0.4)
-                            has_ref = True
+                mask = ~np.isnan(r_t) & ~np.isnan(r_f)
+                r_t, r_f = r_t[mask], r_f[mask]
 
-        # --- ส่วนที่ 2: วาดเส้น User (สีดำหนา) ---
+                if len(r_t) > 0:
+                    sort_idx = np.argsort(r_t)
+                    # เส้นสีแดงจางๆ (Reference Group)
+                    plt.plot(r_t.iloc[sort_idx], r_f.iloc[sort_idx],
+                             color='#ff3333', linestyle='--', linewidth=1, alpha=0.4)
+                    has_ref = True
+
+        # --- 2. วาดเส้น User Data (Foreground) ---
+        # เส้นสีดำหนา (Your Sample)
         plt.plot(user_t, user_f, label='Your Sample', color='black', linewidth=3.0, zorder=10)
 
-        # --- ตกแต่งกราฟ ---
+        # --- 3. ตกแต่งกราฟ ---
         plt.title(f"Comparison: User Sample vs {species_name} Group", fontsize=14, fontweight='bold')
         plt.xlabel("Temperature (°C)", fontsize=12)
         plt.ylabel("Fluorescence (Diff)", fontsize=12)
+        plt.grid(True, linestyle=':', alpha=0.6)
 
         # Legend
         from matplotlib.lines import Line2D
-        custom_lines = [Line2D([0], [0], color='black', lw=3, label='Your Sample')]
+        legend_elements = [
+            Line2D([0], [0], color='black', lw=3, label='Your Sample'),
+        ]
         if has_ref:
-            custom_lines.append(Line2D([0], [0], color='#ff3333', lw=1, linestyle='--', label=f'Ref Group'))
+            legend_elements.append(Line2D([0], [0], color='#ff3333', lw=1, linestyle='--', label=f'Ref: {species_name} Group'))
 
-        plt.legend(handles=custom_lines, loc='upper right')
-        plt.grid(True, linestyle=':', alpha=0.6)
+        plt.legend(handles=legend_elements, loc='upper right')
         plt.tight_layout()
 
-        # Save Plot
+        # Save to Base64
         buf = io.BytesIO()
         plt.savefig(buf, format='png', dpi=120)
         plt.close()
@@ -189,7 +207,7 @@ def generate_plot_base64(user_t, user_f, species_name):
 # ==========================================
 @app.get("/")
 def home():
-    ref_status = f"Loaded ({len(ref_df)} rows)" if ref_df is not None else "NOT FOUND - CHECK GITHUB"
+    ref_status = f"Loaded ({len(ref_df)} rows)" if ref_df is not None else "NOT FOUND"
     return {"message": f"Orchid AI Ready. Ref File: {ref_status}"}
 
 @app.post("/predict")
@@ -220,12 +238,15 @@ async def predict(files: List[UploadFile] = File(...)):
                     features_df = pd.DataFrame([[T_peak, F_peak, width, area]],
                                              columns=["T_peak", "F_peak", "Width_FWHM", "Area"])
 
+                    # Predict
                     pred_idx = model_data["model"].predict(features_df)[0]
                     species_name = model_data["label_encoder"].inverse_transform([pred_idx])[0]
 
+                    # Confidence
                     probabilities = model_data["model"].predict_proba(features_df)[0]
                     confidence = round(probabilities[pred_idx] * 100, 2)
 
+                    # Plot
                     plot_image = generate_plot_base64(t_arr, f_arr, species_name)
 
                     return {
@@ -241,6 +262,7 @@ async def predict(files: List[UploadFile] = File(...)):
                     }
                 return None
 
+            # User file usually has 'T' and 'F' columns
             if 'T' in columns and 'F' in columns:
                 res = process_and_predict(
                     pd.to_numeric(df['T'], errors='coerce').values,
@@ -249,6 +271,7 @@ async def predict(files: List[UploadFile] = File(...)):
                 )
                 if res: all_results.append(res)
 
+            # Support multi-column format just in case
             for col in columns:
                 m = re.match(r"^(.*)T(\d+)$", str(col))
                 if m:
