@@ -33,7 +33,7 @@ app.add_middleware(
 )
 
 # ==========================================
-# 1. SETUP
+# 1. SETUP & LOAD DATA
 # ==========================================
 MODEL_FILENAME = 'orchid_decision_tree_v1.pkl'
 REF_DATA_FILENAME = 'PROJECT_DATA.xlsx'
@@ -44,27 +44,31 @@ REF_PATH = os.path.join(os.path.dirname(__file__), REF_DATA_FILENAME)
 model_data = None
 ref_df = None
 
-# Load Model
+# โหลดโมเดล
 try:
     if os.path.exists(MODEL_PATH):
         model_data = joblib.load(MODEL_PATH)
-        print(f"✅ Model Loaded: {MODEL_FILENAME}")
+        print(f"✅ Model Loaded Successfully")
     else:
-        print(f"❌ Model Not Found: {MODEL_PATH}")
+        print(f"❌ Model Not Found at {MODEL_PATH}")
 except Exception as e:
     print(f"❌ Error loading model: {e}")
 
-# Load Reference Data
+# โหลด Reference Data (สำคัญมากสำหรับเส้นแดง)
 try:
     if os.path.exists(REF_PATH):
         if REF_DATA_FILENAME.endswith('.csv'):
             ref_df = pd.read_csv(REF_PATH)
         else:
             ref_df = pd.read_excel(REF_PATH)
-        ref_df.columns = ref_df.columns.str.strip() # Clean column names
-        print(f"✅ Reference Data Loaded: {REF_DATA_FILENAME} ({len(ref_df)} rows)")
+
+        # ✅ CLEANING: ลบช่องว่างหัว-ท้าย และแปลงชื่อคอลัมน์ทั้งหมดเป็นตัวพิมพ์เล็กไว้ก่อนเลย
+        ref_df.columns = ref_df.columns.str.strip().str.lower()
+
+        print(f"✅ Reference Data Loaded: {len(ref_df)} rows")
+        print(f"📊 Example Columns in Ref Data: {list(ref_df.columns[:5])}") # Print ดูตัวอย่างชื่อคอลัมน์
     else:
-        print(f"⚠️ Reference Data Not Found at: {REF_PATH}")
+        print(f"⚠️ Reference Data Not Found! (File missing in GitHub?)")
 except Exception as e:
     print(f"⚠️ Error loading reference data: {e}")
 
@@ -101,62 +105,48 @@ def generate_plot_base64(user_t, user_f, species_name):
     try:
         plt.figure(figsize=(8, 5))
 
-        # 1. วาดเส้น User (Blue)
+        # 1. วาดเส้น User (สีน้ำเงิน)
         plt.plot(user_t, user_f, label='Your Sample', color='#0066cc', linewidth=2)
 
-        # 2. วาดเส้น Reference (Red)
+        # 2. วาดเส้น Reference (สีแดง)
         if ref_df is not None and species_name != "Unknown":
-            # --- แก้ไข Logic การค้นหาชื่อ ---
-            # 1. แปลงเป็นตัวพิมพ์เล็ก
-            search_key = species_name.lower().strip()
+            # --- DEBUG INFO ---
+            print(f"--- Plotting for: '{species_name}' ---")
 
-            # 2. ถ้าชื่อลงท้ายด้วย 't' ให้ตัดออก (เช่น PtanalbaT -> ptanalba)
-            # เพื่อป้องกันการค้นหาซ้ำซ้อน (PtanalbaTT1)
+            # เตรียมคำค้นหา: แปลงเป็นตัวเล็ก, ตัด 'sp', ตัด 'T' ท้ายคำ
+            # เช่น "PtanalbaT" -> "ptanalba"
+            search_key = species_name.lower().replace('sp', '').strip()
             if search_key.endswith('t'):
                 search_key = search_key[:-1]
 
-            # 3. ลบคำว่า 'sp' ถ้ามี
-            search_key = search_key.replace('sp', '').strip()
+            print(f"   🔍 Key: '{search_key}'")
 
-            print(f"🔍 Searching Ref for: '{search_key}' (Orig: {species_name})")
+            cols = list(ref_df.columns)
+            target_t_col = None
+            target_f_col = None
 
-            cols = ref_df.columns.tolist()
-            found_t = None
-            found_f = None
-
-            # 4. วนลูปหาคอลัมน์ที่ขึ้นต้นด้วย search_key และมี T ตามด้วยตัวเลข
+            # --- SEARCH LOGIC (แบบกวาดทุกคอลัมน์) ---
             for col in cols:
-                col_lower = str(col).lower()
-
-                # เงื่อนไข:
-                # (1) ต้องมีชื่อสายพันธุ์ (ptanalba) อยู่ในชื่อคอลัมน์
-                # (2) ต้องมีตัว 't' ตามด้วยตัวเลข (t1, t2...)
-                if search_key in col_lower and re.search(r't\d+$', col_lower):
-
-                    # เจอคอลัมน์ T แล้ว! (เช่น PtanalbaT1)
-                    # หาคู่ F ของมัน
-                    last_t_idx = str(col).lower().rfind('t')
-                    if last_t_idx != -1:
-                        prefix = str(col)[:last_t_idx]
-                        suffix = str(col)[last_t_idx+1:]
-
-                        # ลองสร้างชื่อ F (ทั้ง F ตัวใหญ่และเล็ก)
-                        candidate_f = f"{prefix}F{suffix}"
-                        candidate_f_lower = f"{prefix}f{suffix}"
+                # เงื่อนไข 1: ชื่อสายพันธุ์ต้องอยู่ในชื่อคอลัมน์ (เช่น 'ptanalba' อยู่ใน 'ptanalbat1')
+                if search_key in col:
+                    # เงื่อนไข 2: ต้องเป็นคอลัมน์ T (มี 't' และตามด้วยตัวเลข)
+                    if 't' in col and any(char.isdigit() for char in col):
+                        # เจอคอลัมน์ T ที่น่าจะใช่แล้ว!
+                        # ลองสร้างชื่อคอลัมน์ F คู่กัน
+                        # เทคนิค: หาตัว t ตัวสุดท้าย แล้วเปลี่ยนเป็น f
+                        last_t_index = col.rfind('t')
+                        candidate_f = col[:last_t_index] + 'f' + col[last_t_index+1:]
 
                         if candidate_f in cols:
-                            found_t = col
-                            found_f = candidate_f
-                            break
-                        elif candidate_f_lower in cols:
-                            found_t = col
-                            found_f = candidate_f_lower
-                            break
+                            target_t_col = col
+                            target_f_col = candidate_f
+                            print(f"   ✅ Found Match! T='{target_t_col}', F='{target_f_col}'")
+                            break # เจอคู่แรกเอาเลย
 
-            if found_t and found_f:
-                print(f"   ✅ Match Found: T={found_t}, F={found_f}")
-                ref_t = pd.to_numeric(ref_df[found_t], errors='coerce')
-                ref_f = pd.to_numeric(ref_df[found_f], errors='coerce')
+            # --- วาดกราฟเส้นแดง ---
+            if target_t_col and target_f_col:
+                ref_t = pd.to_numeric(ref_df[target_t_col], errors='coerce')
+                ref_f = pd.to_numeric(ref_df[target_f_col], errors='coerce')
 
                 mask = ~np.isnan(ref_t) & ~np.isnan(ref_f)
                 ref_t, ref_f = ref_t[mask], ref_f[mask]
@@ -166,7 +156,10 @@ def generate_plot_base64(user_t, user_f, species_name):
                          label=f'Ref: {species_name}',
                          color='#ff3333', linestyle='--', linewidth=2, alpha=0.8)
             else:
-                print(f"   ❌ No matching columns found for '{search_key}'")
+                print(f"   ❌ NO MATCH FOUND for key '{search_key}' in reference file.")
+                # ถ้าไม่เจอ ลองปริ้นท์ชื่อคอลัมน์ใกล้เคียงให้ดูหน่อย
+                nearby = [c for c in cols if search_key in c]
+                print(f"   Available columns containing '{search_key}': {nearby}")
 
         plt.title(f"Comparison: {species_name}", fontsize=14)
         plt.xlabel("Temperature (°C)")
@@ -192,8 +185,8 @@ def generate_plot_base64(user_t, user_f, species_name):
 # ==========================================
 @app.get("/")
 def home():
-    ref_status = "Loaded" if ref_df is not None else "Not Found"
-    return {"message": f"Orchid AI Ready. Ref: {ref_status}"}
+    ref_status = "Loaded" if ref_df is not None else "Not Found (Check GitHub)"
+    return {"message": f"Orchid AI Ready. Ref Data: {ref_status}"}
 
 @app.post("/predict")
 async def predict(files: List[UploadFile] = File(...)):
@@ -231,7 +224,7 @@ async def predict(files: List[UploadFile] = File(...)):
                     probabilities = model_data["model"].predict_proba(features_df)[0]
                     confidence = round(probabilities[pred_idx] * 100, 2)
 
-                    # 3. Plot (Smart Search)
+                    # 3. Plot
                     plot_image = generate_plot_base64(t_arr, f_arr, species_name)
 
                     return {
