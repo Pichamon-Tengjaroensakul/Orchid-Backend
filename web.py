@@ -54,25 +54,22 @@ try:
 except Exception as e:
     print(f"❌ Error loading model: {e}")
 
-# โหลด Reference Data (สำคัญมาก!)
+# โหลด Reference Data
 try:
     if os.path.exists(REF_PATH):
-        # พยายามโหลดไฟล์ (รองรับกรณีอัปโหลดเป็น csv มาในชื่อ xlsx)
         try:
             if REF_DATA_FILENAME.endswith('.csv'):
                 ref_df = pd.read_csv(REF_PATH)
             else:
                 ref_df = pd.read_excel(REF_PATH)
         except:
-             # Fallback
-             ref_df = pd.read_excel(REF_PATH)
+            ref_df = pd.read_excel(REF_PATH)
 
-        # ✅ CLEANING: ทำชื่อคอลัมน์ให้สะอาด (ตัดช่องว่าง, ตัวเล็ก)
+        # ✅ Cleaning: แปลงชื่อคอลัมน์เป็นตัวพิมพ์เล็ก และตัดช่องว่างทิ้ง
         ref_df.columns = ref_df.columns.str.strip().str.lower()
         print(f"✅ Reference Data Loaded: {len(ref_df)} rows")
-        print(f"   Sample Cols: {list(ref_df.columns[:10])}")
     else:
-        print(f"⚠️ Reference Data Not Found! (Red line will be missing)")
+        print(f"⚠️ Reference Data Not Found!")
 except Exception as e:
     print(f"⚠️ Error loading reference data: {e}")
 
@@ -107,56 +104,46 @@ def extract_peak_features(t, f):
 
 def generate_plot_base64(user_t, user_f, species_name):
     try:
+        # ตั้งค่ากราฟให้สวยงาม (ขนาดและ Font)
         plt.figure(figsize=(8, 5))
 
         # 1. วาดเส้น User (สีน้ำเงิน)
-        plt.plot(user_t, user_f, label='Your Sample', color='#0066cc', linewidth=2)
+        plt.plot(user_t, user_f, label='Your Sample', color='#0066cc', linewidth=2.5)
 
         # 2. วาดเส้น Reference (สีแดง)
         if ref_df is not None and species_name != "Unknown":
             print(f"--- Searching Ref for: {species_name} ---")
 
-            # เตรียมคำค้นหา: ตัด sp, ตัด T ท้ายคำ (เช่น PtanalbaT -> ptanalba)
+            # เตรียมคำค้นหา: ตัด sp, ตัด T ท้ายคำ
             search_key = species_name.lower().replace('sp', '').strip()
-            if search_key.endswith('t'):
-                search_key = search_key[:-1]
+            if search_key.endswith('t'): search_key = search_key[:-1]
 
             # ค้นหาคอลัมน์ทั้งหมดที่เข้าข่าย: "ชื่อสายพันธุ์ + T + ตัวเลข"
-            # เช่นเจอ: [pmist2, pmist3, pmist4]
-            cols = list(ref_df.columns)
-            matched_cols = []
+            # Regex: ^search_key + t + \d+
+            pattern = re.compile(f"^{re.escape(search_key)}t\\d+$", re.IGNORECASE)
 
-            for col in cols:
-                # เช็คว่ามี key อยู่ในชื่อ และต้องเป็น pattern: key + t + number
-                # ใช้ regex เพื่อความชัวร์: ^key + t + \d+
-                if re.search(f"{re.escape(search_key)}t\\d+", col):
-                    matched_cols.append(col)
+            cols = list(ref_df.columns)
+            matched_cols = [c for c in cols if pattern.match(c)]
 
             target_t_col = None
             target_f_col = None
 
             if matched_cols:
-                # เรียงลำดับชื่อคอลัมน์ เพื่อให้ T1, T2, T3 เรียงกันสวยๆ
+                # เรียงลำดับชื่อคอลัมน์ (เพื่อให้ได้ T1, T2, T3...)
+                # เราจะเลือกตัวแรกสุดที่เจอ (เช่น ถ้ามี T2 ก็เอา T2 เลย ไม่ต้องรอ T1)
                 matched_cols.sort()
+                target_t_col = matched_cols[0]
 
-                # พยายามหา T1 ก่อน
-                t1 = next((c for c in matched_cols if 't1' in c), None)
-                if t1:
-                    target_t_col = t1
-                else:
-                    # ถ้าไม่มี T1 (เช่นเคส Pmis) ให้เอาตัวแรกที่เจอ (เช่น T2)
-                    target_t_col = matched_cols[0]
+                print(f"   ✅ Selected Ref Column: {target_t_col}")
 
-                print(f"   Selected T Col: {target_t_col}")
-
-                # หา F คู่กัน
-                # เปลี่ยน t ตัวสุดท้ายเป็น f
+                # หา F คู่กัน (เปลี่ยน t ตัวสุดท้ายเป็น f)
                 last_t = target_t_col.rfind('t')
                 candidate_f = target_t_col[:last_t] + 'f' + target_t_col[last_t+1:]
 
                 if candidate_f in cols:
                     target_f_col = candidate_f
-                    print(f"   Found F Col: {target_f_col}")
+                else:
+                    print(f"   ❌ F-column not found for {target_t_col}")
 
             # วาดกราฟ
             if target_t_col and target_f_col:
@@ -166,24 +153,25 @@ def generate_plot_base64(user_t, user_f, species_name):
                 mask = ~np.isnan(ref_t) & ~np.isnan(ref_f)
                 ref_t, ref_f = ref_t[mask], ref_f[mask]
 
-                # Sort T
+                # Sort ตามอุณหภูมิ (สำคัญมาก ไม่งั้นกราฟยึกยือ)
                 sort_idx = np.argsort(ref_t)
 
                 plt.plot(ref_t.iloc[sort_idx], ref_f.iloc[sort_idx],
                          label=f'Ref: {species_name}',
                          color='#ff3333', linestyle='--', linewidth=2, alpha=0.8)
             else:
-                print(f"❌ No matching pair found for {search_key}")
+                print(f"❌ No matching pair found for {species_name}")
 
-        plt.title(f"Comparison: {species_name}", fontsize=14)
-        plt.xlabel("Temperature (°C)")
-        plt.ylabel("Fluorescence (Diff)")
-        plt.legend()
+        plt.title(f"Comparison: {species_name}", fontsize=14, fontweight='bold')
+        plt.xlabel("Temperature (°C)", fontsize=12)
+        plt.ylabel("Fluorescence (Diff)", fontsize=12)
+        plt.legend(fontsize=10)
         plt.grid(True, linestyle=':', alpha=0.6)
         plt.tight_layout()
 
+        # Save Plot to Base64
         buf = io.BytesIO()
-        plt.savefig(buf, format='png', dpi=100)
+        plt.savefig(buf, format='png', dpi=120) # เพิ่ม DPI ให้ชัดขึ้น
         plt.close()
         buf.seek(0)
         img_str = base64.b64encode(buf.read()).decode('utf-8')
@@ -254,7 +242,7 @@ async def predict(files: List[UploadFile] = File(...)):
                     }
                 return None
 
-            # Case: T, F Columns
+            # Case: T, F columns
             if 'T' in columns and 'F' in columns:
                 res = process_and_predict(
                     pd.to_numeric(df['T'], errors='coerce').values,
@@ -263,7 +251,7 @@ async def predict(files: List[UploadFile] = File(...)):
                 )
                 if res: all_results.append(res)
 
-            # Case: Multi Columns
+            # Case: Multi columns
             for col in columns:
                 m = re.match(r"^(.*)T(\d+)$", str(col))
                 if m:
