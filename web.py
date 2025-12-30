@@ -9,7 +9,7 @@ Original file is located at
 
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from typing import List  # ✅ เพิ่มตรงนี้เพื่อรองรับ List
+from typing import List  # ✅ สำคัญ: ต้องมีบรรทัดนี้เพื่อรับหลายไฟล์
 import uvicorn
 import pandas as pd
 import numpy as np
@@ -74,20 +74,20 @@ def extract_peak_features(t, f):
         return np.nan, np.nan, np.nan, np.nan
 
 # ==========================================
-# 3. API Endpoints (แบบ Multi-File)
+# 3. API Endpoints (Multi-File Support)
 # ==========================================
 @app.get("/")
 def home():
-    status = "พร้อมทำนาย (Multi-File Supported)" if model_data else "ไม่พบโมเดล"
+    status = "พร้อมทำนาย (Multi-File)" if model_data else "ไม่พบโมเดล"
     return {"message": f"Orchid AI Backend: {status}"}
 
-# ✅ แก้ไขตรงนี้: รับ files เป็น List[UploadFile]
+# ✅ รับไฟล์เป็น List
 @app.post("/predict")
 async def predict(files: List[UploadFile] = File(...)):
     if not model_data:
         raise HTTPException(status_code=500, detail="Model file not found on server.")
 
-    all_results = [] # เก็บผลลัพธ์รวมของทุกไฟล์
+    all_results = []  # เก็บผลรวมทุกไฟล์
 
     try:
         # 🔄 วนลูปทำทีละไฟล์
@@ -97,18 +97,20 @@ async def predict(files: List[UploadFile] = File(...)):
 
             columns = df.columns.tolist()
             processed_pairs = set()
-            file_results = [] # ผลลัพธ์เฉพาะไฟล์นี้
 
-            # ฟังก์ชันย่อย (เหมือนเดิม)
+            # ฟังก์ชันย่อย
             def process_and_predict(t_arr, f_arr, sample_name):
                 T_peak, F_peak, width, area = extract_peak_features(t_arr, f_arr)
+
                 if not np.isnan(T_peak):
                     features_df = pd.DataFrame([[T_peak, F_peak, width, area]],
                                              columns=["T_peak", "F_peak", "Width_FWHM", "Area"])
+
                     pred_idx = model_data["model"].predict(features_df)[0]
                     species_name = model_data["label_encoder"].inverse_transform([pred_idx])[0]
+
                     return {
-                        "filename": file.filename, # ✅ เพิ่มชื่อไฟล์ต้นฉบับ
+                        "filename": file.filename,  # ✅ บอกชื่อไฟล์
                         "sample_id": sample_name,
                         "T_peak": round(T_peak, 4),
                         "F_peak": round(F_peak, 4),
@@ -118,14 +120,14 @@ async def predict(files: List[UploadFile] = File(...)):
                     }
                 return None
 
-            # Logic วนลูปคอลัมน์ (เหมือนเดิม)
+            # Logic เดิม (T,F เดี่ยว หรือ หลายคอลัมน์)
             if 'T' in columns and 'F' in columns:
                 res = process_and_predict(
                     pd.to_numeric(df['T'], errors='coerce').values,
                     pd.to_numeric(df['F'], errors='coerce').values,
                     "Uploaded-Sample"
                 )
-                if res: all_results.append(res) # เพิ่มลงผลรวม
+                if res: all_results.append(res)
 
             for col in columns:
                 m = re.match(r"^(.*)T(\d+)$", str(col))
@@ -139,10 +141,10 @@ async def predict(files: List[UploadFile] = File(...)):
                             pd.to_numeric(df[f_col], errors='coerce').values,
                             f"{prefix}-{num}"
                         )
-                        if res: all_results.append(res) # เพิ่มลงผลรวม
+                        if res: all_results.append(res)
 
         if not all_results:
-             return {"success": False, "message": "No valid data found in uploaded files."}
+             return {"success": False, "message": "No valid data found."}
 
         return {"success": True, "results": all_results}
 
