@@ -19,7 +19,7 @@ import re
 import io
 import base64
 import matplotlib
-matplotlib.use('Agg') # ใช้ Backend แบบไม่แสดงหน้าต่าง (สำหรับ Server)
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 app = FastAPI()
@@ -33,10 +33,10 @@ app.add_middleware(
 )
 
 # ==========================================
-# 1. โหลดโมเดล และ ข้อมูลอ้างอิง (Reference Data)
+# 1. SETUP MODEL & REFERENCE DATA
 # ==========================================
 MODEL_FILENAME = 'orchid_decision_tree_v1.pkl'
-REF_DATA_FILENAME = 'PROJECT_DATA.xlsx' # ⚠️ ต้องมีไฟล์นี้ใน GitHub
+REF_DATA_FILENAME = 'PROJECT_DATA.xlsx' # ✅ ต้องมีไฟล์นี้ใน GitHub คู่กับ web.py
 
 MODEL_PATH = os.path.join(os.path.dirname(__file__), MODEL_FILENAME)
 REF_PATH = os.path.join(os.path.dirname(__file__), REF_DATA_FILENAME)
@@ -44,7 +44,7 @@ REF_PATH = os.path.join(os.path.dirname(__file__), REF_DATA_FILENAME)
 model_data = None
 ref_df = None
 
-# โหลดโมเดล
+# Load Model
 try:
     if os.path.exists(MODEL_PATH):
         model_data = joblib.load(MODEL_PATH)
@@ -54,21 +54,22 @@ try:
 except Exception as e:
     print(f"❌ Error loading model: {e}")
 
-# โหลดไฟล์ข้อมูลอ้างอิง (PROJECT_DATA)
+# Load Reference Data
 try:
     if os.path.exists(REF_PATH):
-        if REF_PATH.endswith('.csv'):
+        # เช็คว่าเป็น CSV หรือ Excel
+        if REF_DATA_FILENAME.endswith('.csv'):
             ref_df = pd.read_csv(REF_PATH)
         else:
             ref_df = pd.read_excel(REF_PATH)
-        print(f"✅ Reference Data Loaded: {REF_DATA_FILENAME}")
+        print(f"✅ Reference Data Loaded: {REF_DATA_FILENAME} ({len(ref_df)} rows)")
     else:
-        print(f"⚠️ Reference Data Not Found (Graph will have no reference line)")
+        print(f"⚠️ Reference Data Not Found at: {REF_PATH}")
 except Exception as e:
     print(f"⚠️ Error loading reference data: {e}")
 
 # ==========================================
-# 2. ฟังก์ชันคำนวณ Feature & Helper
+# 2. FUNCTIONS
 # ==========================================
 def extract_peak_features(t, f):
     try:
@@ -96,53 +97,57 @@ def extract_peak_features(t, f):
     except:
         return np.nan, np.nan, np.nan, np.nan
 
-# ฟังก์ชันวาดกราฟและแปลงเป็น Base64
 def generate_plot_base64(user_t, user_f, species_name):
     try:
-        plt.figure(figsize=(6, 4))
+        plt.figure(figsize=(7, 4.5)) # ปรับขนาดให้สวยงาม
 
-        # 1. พล็อตเส้นของผู้ใช้ (User Data)
-        plt.plot(user_t, user_f, label='Your Sample', color='blue', linewidth=2)
+        # 1. วาดเส้น User (Blue)
+        plt.plot(user_t, user_f, label='Your Sample', color='blue', linewidth=2.5)
 
-        # 2. พล็อตเส้นอ้างอิง (Reference) จาก PROJECT_DATA
+        # 2. วาดเส้น Reference (Red) ถ้ามีข้อมูล
         if ref_df is not None and species_name != "Unknown":
-            # พยายามหาคอลัมน์ที่ชื่อใกล้เคียงกับสายพันธุ์ที่ทำนายได้
-            # เช่น ทำนายได้ "Ptanalba" -> หาคอลัมน์ที่ขึ้นต้นด้วย "PtanalbaT..."
-            found_ref = False
             cols = ref_df.columns
+            found = False
 
-            # Logic การหาคู่ T, F ของสายพันธุ์นั้น (เอาอันแรกที่เจอมาเป็น Ref)
+            # Logic หาคอลัมน์: พยายามหาคอลัมน์ที่มีชื่อสายพันธุ์
+            # ตัวอย่างชื่อคอลัมน์: "PtanalbaT1", "PtanalbaF1"
+            search_name = species_name.split(' ')[0] # เอาคำแรก (เช่น Ptanalba)
+
             for col in cols:
-                # ตรวจสอบว่าคอลัมน์เริ่มด้วยชื่อสายพันธุ์ และจบด้วย T ตามด้วยตัวเลข
-                # เราจะตัดคำว่า 'sp' หรือตัวอักษรท้ายๆ ออกนิดหน่อยเพื่อให้ match ง่ายขึ้น
-                search_key = species_name.split(' ')[0] # เอาแค่ชื่อแรก
-
-                if search_key in str(col) and 'T' in str(col):
+                # ถ้าเจอหัวคอลัมน์ที่มีชื่อสายพันธุ์ และลงท้ายด้วย T และตัวเลข
+                if search_name in str(col) and 'T' in str(col):
                     # หาคู่ F ของมัน
-                    prefix = str(col).split('T')[0] # เช่น Ptanalba
-                    suffix = str(col).split('T')[-1] # เช่น 1
-                    f_col_candidate = f"{prefix}F{suffix}"
+                    # สมมติ col = PtanalbaT1 -> หา PtanalbaF1
+                    prefix = str(col).split('T')[0] # Ptanalba
+                    suffix = str(col).split('T')[-1] # 1
+                    f_col = f"{prefix}F{suffix}"
 
-                    if f_col_candidate in cols:
-                        ref_t = pd.to_numeric(ref_df[col], errors='coerce').dropna()
-                        ref_f = pd.to_numeric(ref_df[f_col_candidate], errors='coerce').dropna()
+                    if f_col in cols:
+                        ref_t_raw = pd.to_numeric(ref_df[col], errors='coerce')
+                        ref_f_raw = pd.to_numeric(ref_df[f_col], errors='coerce')
 
-                        # ต้อง sort T ก่อน plot
+                        # ลบค่า Nan และ Sort
+                        mask = ~np.isnan(ref_t_raw) & ~np.isnan(ref_f_raw)
+                        ref_t = ref_t_raw[mask]
+                        ref_f = ref_f_raw[mask]
+
                         sort_idx = np.argsort(ref_t)
+
+                        # วาดเส้นแดง
                         plt.plot(ref_t.iloc[sort_idx], ref_f.iloc[sort_idx],
                                  label=f'Ref: {species_name}',
-                                 color='red', linestyle='--', alpha=0.7)
-                        found_ref = True
-                        break # เจอเส้นนึงแล้ว พอเลย
+                                 color='red', linestyle='--', linewidth=2, alpha=0.7)
+                        found = True
+                        break # เจอ 1 เส้นแล้วพอเลย
 
-        plt.title(f"Comparison: Your Sample vs {species_name}")
-        plt.xlabel("Temperature (T)")
-        plt.ylabel("Fluorescence (F)")
+        plt.title(f"Prediction: {species_name}", fontsize=12)
+        plt.xlabel("Temperature (°C)")
+        plt.ylabel("Fluorescence (Diff)")
         plt.legend()
-        plt.grid(True, alpha=0.3)
+        plt.grid(True, linestyle=':', alpha=0.6)
         plt.tight_layout()
 
-        # Save to buffer
+        # Convert to Base64
         buf = io.BytesIO()
         plt.savefig(buf, format='png', dpi=100)
         plt.close()
@@ -156,17 +161,17 @@ def generate_plot_base64(user_t, user_f, species_name):
         return None
 
 # ==========================================
-# 3. API Endpoints
+# 3. API ENDPOINT
 # ==========================================
 @app.get("/")
 def home():
-    status = "พร้อมใช้งาน (Graph Plotting Enabled)"
-    return {"message": f"Orchid AI Backend: {status}"}
+    ref_status = "Loaded" if ref_df is not None else "Not Found (No Red Line)"
+    return {"message": f"Orchid AI: Model Loaded, Ref Data: {ref_status}"}
 
 @app.post("/predict")
 async def predict(files: List[UploadFile] = File(...)):
     if not model_data:
-        raise HTTPException(status_code=500, detail="Model not found.")
+        raise HTTPException(status_code=500, detail="Model file not found.")
 
     all_results = []
 
@@ -194,7 +199,7 @@ async def predict(files: List[UploadFile] = File(...)):
                     pred_idx = model_data["model"].predict(features_df)[0]
                     species_name = model_data["label_encoder"].inverse_transform([pred_idx])[0]
 
-                    # ✅ สร้างกราฟ (Base64 Image)
+                    # สร้างกราฟ (จะมีเส้นแดงถ้าเจอ Ref Data)
                     plot_image = generate_plot_base64(t_arr, f_arr, species_name)
 
                     return {
@@ -205,7 +210,7 @@ async def predict(files: List[UploadFile] = File(...)):
                         "Width_FWHM": round(width, 4),
                         "Area": round(area, 4),
                         "predicted_species": species_name,
-                        "plot_image": plot_image # ส่งรูปกลับไปให้ Frontend
+                        "plot_image": plot_image
                     }
                 return None
 
