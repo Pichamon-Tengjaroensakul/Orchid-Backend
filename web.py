@@ -19,7 +19,7 @@ import re
 import io
 import base64
 import matplotlib
-matplotlib.use('Agg') # ใช้ Backend แบบไม่แสดงหน้าต่าง (จำเป็นสำหรับ Server)
+matplotlib.use('Agg') # Backend สำหรับ Server (ไม่โชว์หน้าต่าง)
 import matplotlib.pyplot as plt
 
 app = FastAPI()
@@ -54,10 +54,9 @@ try:
 except Exception as e:
     print(f"❌ Error loading model: {e}")
 
-# 1.2 โหลด Reference Data (PROJECT_DATA.xlsx)
+# 1.2 โหลด Reference Data (PROJECT_DATA)
 try:
     if os.path.exists(REF_PATH):
-        # พยายามโหลดไฟล์ (รองรับทั้ง csv และ excel)
         try:
             if REF_DATA_FILENAME.endswith('.csv'):
                 ref_df = pd.read_csv(REF_PATH)
@@ -66,11 +65,11 @@ try:
         except:
             ref_df = pd.read_excel(REF_PATH)
 
-        # ✅ Cleaning: ลบช่องว่างหัวท้ายชื่อคอลัมน์
+        # Cleaning: ตัดช่องว่างและทำเป็นตัวพิมพ์เล็กทั้งหมดเพื่อการค้นหาที่แม่นยำ
         ref_df.columns = ref_df.columns.str.strip()
         print(f"✅ Reference Data Loaded: {len(ref_df)} rows")
     else:
-        print(f"⚠️ Reference Data Not Found! (Reference lines will not show)")
+        print(f"⚠️ Reference Data Not Found! (Plot will have no background lines)")
 except Exception as e:
     print(f"⚠️ Error loading reference data: {e}")
 
@@ -105,79 +104,79 @@ def extract_peak_features(t, f):
 
 def generate_plot_base64(user_t, user_f, species_name):
     """
-    ฟังก์ชันวาดกราฟ:
-    - วาดเส้น Reference ทั้งหมดที่เกี่ยวข้องกับสายพันธุ์ (สีแดงจางๆ)
-    - วาดเส้น User Data ทับลงไป (สีดำหนา)
+    สร้างกราฟเปรียบเทียบ:
+    1. วาดเส้น Reference ทั้งหมด (สีแดงจางๆ) เป็น Background
+    2. วาดเส้น User (สีดำหนา) ทับด้านหน้า
     """
     try:
         plt.figure(figsize=(8, 5))
 
-        # ---------------------------------------------------------
-        # ส่วนที่ 1: วาดเส้น Reference (PROJECT_DATA) ไว้ข้างหลัง
-        # ---------------------------------------------------------
-        has_ref = False
+        has_ref_lines = False
+
+        # --- ส่วนที่ 1: วาดเส้น Reference (Project Data) ---
         if ref_df is not None and species_name != "Unknown":
-            # เตรียมคำค้นหา: ตัดคำว่า sp, ตัดตัว T ท้ายคำ
+            # เตรียมคำค้นหา: "PtanalbaT" -> "ptanalba"
+            # 1. ตัด sp
             clean_name = species_name.replace('sp', '').strip()
+            # 2. ถ้าลงท้ายด้วย T หรือ t ให้ตัดทิ้ง
             if clean_name.endswith('T') or clean_name.endswith('t'):
                  clean_name = clean_name[:-1]
 
-            # แปลงเป็นตัวพิมพ์เล็กเพื่อค้นหาแบบ case-insensitive
-            clean_name_lower = clean_name.lower()
+            search_key = clean_name.lower() # ใช้ตัวพิมพ์เล็กค้นหา
+
+            # กวาดทุกคอลัมน์ใน Excel
             cols = list(ref_df.columns)
 
-            # วนลูปหา "ทุกคอลัมน์" ที่ตรงกับสายพันธุ์นี้ เพื่อวาดเป็นกลุ่ม
             for col in cols:
                 col_lower = col.lower()
 
-                # เช็คว่าชื่อคอลัมน์มีชื่อสายพันธุ์ และเป็นคอลัมน์ T (มี T ตามด้วยตัวเลข)
-                if clean_name_lower in col_lower and 't' in col_lower and any(c.isdigit() for c in col):
+                # Logic: ชื่อคอลัมน์ต้องมีคำค้นหา และต้องเป็นคอลัมน์ T (มี T ตามด้วยตัวเลข)
+                if search_key in col_lower and 't' in col_lower and any(c.isdigit() for c in col):
 
-                    # หาคู่ F ของมัน (เปลี่ยน T ตัวสุดท้ายเป็น F)
-                    # เราต้องหาตำแหน่ง T ตัวสุดท้ายในชื่อจริง (Original Case)
-                    is_upper_t = 'T' in col
-                    last_t_idx = col.rfind('T') if is_upper_t else col.rfind('t')
+                    # หาคอลัมน์ F คู่กัน
+                    # หาตำแหน่ง T สุดท้าย (ไม่ว่าจะ T ใหญ่หรือ t เล็ก)
+                    is_upper = 'T' in col
+                    last_t_idx = col.rfind('T') if is_upper else col.rfind('t')
 
-                    # สร้างชื่อ F ที่คาดหวัง
-                    col_f = col[:last_t_idx] + ('F' if is_upper_t else 'f') + col[last_t_idx+1:]
+                    # สร้างชื่อ F ที่ควรจะเป็น
+                    col_f = col[:last_t_idx] + ('F' if is_upper else 'f') + col[last_t_idx+1:]
 
-                    # ถ้ามีคอลัมน์ F คู่กัน ให้วาดเส้น
+                    # ถ้ามีคอลัมน์ F นี้อยู่จริง -> วาดเส้นเลย
                     if col_f in cols:
                         ref_t = pd.to_numeric(ref_df[col], errors='coerce')
                         ref_f = pd.to_numeric(ref_df[col_f], errors='coerce')
 
                         mask = ~np.isnan(ref_t) & ~np.isnan(ref_f)
                         ref_t, ref_f = ref_t[mask], ref_f[mask]
-                        sort_idx = np.argsort(ref_t)
 
-                        # วาดเส้น Reference เป็นสีแดงจางๆ (alpha=0.4)
-                        plt.plot(ref_t.iloc[sort_idx], ref_f.iloc[sort_idx],
-                                 color='#ff3333', linestyle='--', linewidth=1, alpha=0.3)
-                        has_ref = True
+                        if len(ref_t) > 0:
+                            sort_idx = np.argsort(ref_t)
+                            # วาดเส้นสีแดงจางๆ (alpha=0.3)
+                            plt.plot(ref_t.iloc[sort_idx], ref_f.iloc[sort_idx],
+                                     color='#ff3333', linestyle='-', linewidth=0.8, alpha=0.3)
+                            has_ref_lines = True
 
-        # ---------------------------------------------------------
-        # ส่วนที่ 2: วาดเส้น User (Test Data) เป็น "เส้นสีดำหนา"
-        # ---------------------------------------------------------
+        # --- ส่วนที่ 2: วาดเส้น User (สีดำหนา) ---
         plt.plot(user_t, user_f, label='Your Sample', color='black', linewidth=2.5)
 
-        # ตกแต่งกราฟ
+        # --- ตกแต่งกราฟ ---
         plt.title(f"Comparison: {species_name}", fontsize=14, fontweight='bold')
         plt.xlabel("Temperature (°C)", fontsize=12)
         plt.ylabel("Fluorescence (Diff)", fontsize=12)
 
-        # สร้าง Legend แบบกำหนดเอง (เพื่อให้ดูสะอาดตา)
+        # Legend (สร้างหลอกๆ ให้ดูสะอาดตา)
         from matplotlib.lines import Line2D
         legend_elements = [
             Line2D([0], [0], color='black', lw=2.5, label='Your Sample'),
         ]
-        if has_ref:
-            legend_elements.append(Line2D([0], [0], color='#ff3333', lw=1, linestyle='--', label=f'Ref: {species_name}'))
+        if has_ref_lines:
+             legend_elements.append(Line2D([0], [0], color='#ff3333', lw=1, alpha=0.6, label='Reference Group'))
 
         plt.legend(handles=legend_elements, loc='upper right')
         plt.grid(True, linestyle=':', alpha=0.6)
         plt.tight_layout()
 
-        # แปลงกราฟเป็น Base64 ส่งกลับไป
+        # Save to Base64
         buf = io.BytesIO()
         plt.savefig(buf, format='png', dpi=120)
         plt.close()
@@ -210,7 +209,6 @@ async def predict(files: List[UploadFile] = File(...)):
             contents = await file.read()
             filename = file.filename.lower()
             try:
-                # อ่านไฟล์
                 if filename.endswith('.csv'):
                     df = pd.read_csv(io.BytesIO(contents))
                 else:
@@ -221,22 +219,21 @@ async def predict(files: List[UploadFile] = File(...)):
             columns = df.columns.tolist()
             processed_pairs = set()
 
-            # ฟังก์ชันย่อยสำหรับประมวลผลแต่ละคู่ T,F
             def process_and_predict(t_arr, f_arr, sample_name):
                 T_peak, F_peak, width, area = extract_peak_features(t_arr, f_arr)
                 if not np.isnan(T_peak):
                     features_df = pd.DataFrame([[T_peak, F_peak, width, area]],
                                              columns=["T_peak", "F_peak", "Width_FWHM", "Area"])
 
-                    # 1. ทำนายผล
+                    # Prediction
                     pred_idx = model_data["model"].predict(features_df)[0]
                     species_name = model_data["label_encoder"].inverse_transform([pred_idx])[0]
 
-                    # 2. คำนวณความมั่นใจ (%)
+                    # Confidence
                     probabilities = model_data["model"].predict_proba(features_df)[0]
                     confidence = round(probabilities[pred_idx] * 100, 2)
 
-                    # 3. สร้างกราฟ (Reference + User Plot)
+                    # Plotting
                     plot_image = generate_plot_base64(t_arr, f_arr, species_name)
 
                     return {
@@ -252,7 +249,7 @@ async def predict(files: List[UploadFile] = File(...)):
                     }
                 return None
 
-            # กรณีที่ 1: ไฟล์มีคอลัมน์ T และ F เดี่ยวๆ (User Upload)
+            # Case: T, F columns (User uploaded file)
             if 'T' in columns and 'F' in columns:
                 res = process_and_predict(
                     pd.to_numeric(df['T'], errors='coerce').values,
@@ -261,7 +258,7 @@ async def predict(files: List[UploadFile] = File(...)):
                 )
                 if res: all_results.append(res)
 
-            # กรณีที่ 2: ไฟล์มีหลายคอลัมน์ (เช่น T1, F1, T2, F2...)
+            # Case: Multiple columns
             for col in columns:
                 m = re.match(r"^(.*)T(\d+)$", str(col))
                 if m:
@@ -282,7 +279,7 @@ async def predict(files: List[UploadFile] = File(...)):
         return {"success": True, "results": all_results}
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=550, detail=str(e))
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8000))
