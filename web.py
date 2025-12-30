@@ -57,26 +57,22 @@ except Exception as e:
 # โหลด Reference Data
 try:
     if os.path.exists(REF_PATH):
-        # พยายามโหลดไฟล์ไม่ว่าเป็น CSV หรือ Excel
+        # พยายามอ่านไฟล์ (รองรับทั้ง csv และ excel)
         try:
             if REF_DATA_FILENAME.endswith('.csv'):
                 ref_df = pd.read_csv(REF_PATH)
             else:
                 ref_df = pd.read_excel(REF_PATH)
         except:
-            # ถ้าโหลดแบบแรกไม่ได้ ให้ลองอีกแบบ (เผื่อคนตั้งชื่อนามสกุลผิด)
-            try:
-                ref_df = pd.read_csv(REF_PATH)
-            except:
-                ref_df = pd.read_excel(REF_PATH)
+            # Fallback
+            ref_df = pd.read_excel(REF_PATH)
 
-        # ✅ CLEANING: ลบช่องว่างหัว-ท้าย และแปลงชื่อคอลัมน์ทั้งหมดเป็นตัวพิมพ์เล็ก
-        ref_df.columns = ref_df.columns.str.strip().str.lower()
-
+        # ✅ CLEANING: ตัดช่องว่างหัวท้ายชื่อคอลัมน์ทิ้งให้หมด และทำเป็นตัวพิมพ์เล็ก
+        ref_df.columns = ref_df.columns.str.strip()
         print(f"✅ Reference Data Loaded: {len(ref_df)} rows")
-        print(f"📊 Columns Found (First 10): {list(ref_df.columns[:10])}")
+        # print(f"Sample Cols: {list(ref_df.columns[:5])}")
     else:
-        print(f"⚠️ Reference Data Not Found! (Please upload PROJECT_DATA.xlsx to GitHub)")
+        print(f"⚠️ Reference Data Not Found! (Red line will not appear)")
 except Exception as e:
     print(f"⚠️ Error loading reference data: {e}")
 
@@ -118,68 +114,65 @@ def generate_plot_base64(user_t, user_f, species_name):
 
         # 2. วาดเส้น Reference (สีแดง)
         if ref_df is not None and species_name != "Unknown":
-            # --- DEBUGGING START ---
-            print(f"\n--- 🔍 Searching Reference Line for: '{species_name}' ---")
+            print(f"--- Plotting Ref for: {species_name} ---")
 
-            # เตรียมคำค้นหา: ตัดคำว่า sp, ตัดตัว T ท้ายคำ, แปลงเป็นตัวเล็ก
-            clean_name = species_name.lower().replace('sp', '').strip()
-            if clean_name.endswith('t'): # เช่น PtanalbaT -> ptanalba
-                clean_name = clean_name[:-1]
+            # เตรียมชื่อสำหรับค้นหา (ตัด sp, ตัด T ท้ายคำ)
+            clean_name = species_name.replace('sp', '').strip()
+            if clean_name.endswith('T') or clean_name.endswith('t'):
+                 clean_name = clean_name[:-1]
 
-            print(f"   -> Keyword used for search: '{clean_name}'")
+            # แปลง regex ให้ค้นหาแบบ case-insensitive
+            # แพทเทิร์น: ขึ้นต้นด้วยชื่อสายพันธุ์ + ตามด้วย T + ตามด้วยตัวเลข + จบคำ
+            # ตัวอย่าง: "Ptanalba" -> เจอ "PtanalbaT1", "PtanalbaT2"
+            pattern = re.compile(f"^{re.escape(clean_name)}T\\d+$", re.IGNORECASE)
 
             cols = list(ref_df.columns)
             target_t_col = None
             target_f_col = None
 
-            # --- SEARCH LOGIC (แบบยืดหยุ่นที่สุด) ---
-            # วนลูปดูทุกคอลัมน์ใน Excel
-            for col in cols:
-                # 1. เช็คว่าชื่อคอลัมน์ มีคำค้นหาของเราปนอยู่ไหม (เช่น 'ptanalba' อยู่ใน 'ptanalbat1' ไหม)
-                if clean_name in col:
-                    # 2. เช็คว่าเป็นคอลัมน์ T หรือไม่ (ต้องมีตัว t และตามด้วยตัวเลข)
-                    if 't' in col and any(char.isdigit() for char in col):
+            # วนหาคอลัมน์ที่ตรงกับแพทเทิร์น
+            matches = [c for c in cols if pattern.match(c)]
 
-                        # เจอคอลัมน์ T แล้ว! สมมติว่าเป็น 'ptanalbat1'
-                        # พยายามหาคู่ F ของมัน (เปลี่ยน t ตัวสุดท้ายเป็น f)
-                        last_t_index = col.rfind('t')
-                        candidate_f = col[:last_t_index] + 'f' + col[last_t_index+1:]
+            # ✅ Priority: ถ้าเจอหลายอัน ให้เลือกอันที่ลงท้ายด้วย T1 ก่อน (เพราะเป็นตัวแทนที่ดีที่สุด)
+            t1_match = next((m for m in matches if m.lower().endswith('t1')), None)
 
-                        if candidate_f in cols:
-                            target_t_col = col
-                            target_f_col = candidate_f
-                            print(f"   ✅ MATCH FOUND! Using columns: T='{target_t_col}', F='{target_f_col}'")
-                            break # เจอแล้วหยุดหาเลย
+            if t1_match:
+                target_t_col = t1_match
+            elif matches:
+                target_t_col = matches[0] # ถ้าไม่มี T1 เอาอันแรกที่เจอ
 
-            # ถ้าหาแบบแรกไม่เจอ ลองหาแบบหยาบๆ (ไม่สนใจ T/F แค่หา T ที่ชื่อตรง)
-            if not target_t_col:
-                 for col in cols:
-                    if col.startswith(clean_name) and 't' in col:
-                        # สมมติเจออะไรสักอย่าง ลองเสี่ยงทายคู่ F
-                        candidate_f = col.replace('t', 'f')
-                        if candidate_f in cols:
-                            target_t_col = col
-                            target_f_col = candidate_f
-                            print(f"   ⚠️ Fuzzy Match Found: T='{target_t_col}', F='{target_f_col}'")
-                            break
+            # ถ้าได้คอลัมน์ T แล้ว -> หาคอลัมน์ F คู่กัน
+            if target_t_col:
+                # เปลี่ยน T ตัวสุดท้ายเป็น F (แบบ Case Insensitive)
+                # วิธี: หาตำแหน่ง T สุดท้ายแล้วแทนที่
+                last_t_idx = target_t_col.lower().rfind('t')
 
-            # --- วาดกราฟเส้นแดง ---
+                # ลองสร้างชื่อ F (ลองทั้ง F ใหญ่และ f เล็ก)
+                f_candidate_upper = target_t_col[:last_t_idx] + 'F' + target_t_col[last_t_idx+1:]
+                f_candidate_lower = target_t_col[:last_t_idx] + 'f' + target_t_col[last_t_idx+1:]
+
+                if f_candidate_upper in cols:
+                    target_f_col = f_candidate_upper
+                elif f_candidate_lower in cols:
+                    target_f_col = f_candidate_lower
+
+            # --- วาดกราฟ ---
             if target_t_col and target_f_col:
+                print(f"   ✅ MATCHED: {target_t_col} & {target_f_col}")
+
                 ref_t = pd.to_numeric(ref_df[target_t_col], errors='coerce')
                 ref_f = pd.to_numeric(ref_df[target_f_col], errors='coerce')
 
-                # ลบค่าว่าง
                 mask = ~np.isnan(ref_t) & ~np.isnan(ref_f)
                 ref_t, ref_f = ref_t[mask], ref_f[mask]
 
-                # Sort ข้อมูลก่อนพล็อต (สำคัญมาก ไม่งั้นเส้นพันกัน)
                 sort_idx = np.argsort(ref_t)
 
                 plt.plot(ref_t.iloc[sort_idx], ref_f.iloc[sort_idx],
                          label=f'Ref: {species_name}',
                          color='#ff3333', linestyle='--', linewidth=2, alpha=0.8)
             else:
-                print(f"   ❌ NO MATCH. Scanned {len(cols)} columns but found nothing for '{clean_name}'")
+                print(f"   ❌ NO MATCH found for pattern: {clean_name}T...")
 
         plt.title(f"Comparison: {species_name}", fontsize=14)
         plt.xlabel("Temperature (°C)")
@@ -205,7 +198,7 @@ def generate_plot_base64(user_t, user_f, species_name):
 # ==========================================
 @app.get("/")
 def home():
-    ref_status = "Loaded" if ref_df is not None else "Not Found (Check GitHub)"
+    ref_status = "Loaded" if ref_df is not None else "Not Found"
     return {"message": f"Orchid AI Ready. Ref Data: {ref_status}"}
 
 @app.post("/predict")
@@ -236,7 +229,7 @@ async def predict(files: List[UploadFile] = File(...)):
                     features_df = pd.DataFrame([[T_peak, F_peak, width, area]],
                                              columns=["T_peak", "F_peak", "Width_FWHM", "Area"])
 
-                    # 1. Predict
+                    # 1. Prediction
                     pred_idx = model_data["model"].predict(features_df)[0]
                     species_name = model_data["label_encoder"].inverse_transform([pred_idx])[0]
 
@@ -244,7 +237,7 @@ async def predict(files: List[UploadFile] = File(...)):
                     probabilities = model_data["model"].predict_proba(features_df)[0]
                     confidence = round(probabilities[pred_idx] * 100, 2)
 
-                    # 3. Plot (Debug Mode)
+                    # 3. Plot (with Red Line Logic)
                     plot_image = generate_plot_base64(t_arr, f_arr, species_name)
 
                     return {
@@ -260,6 +253,7 @@ async def predict(files: List[UploadFile] = File(...)):
                     }
                 return None
 
+            # Case 1: T, F columns (User Upload)
             if 'T' in columns and 'F' in columns:
                 res = process_and_predict(
                     pd.to_numeric(df['T'], errors='coerce').values,
@@ -268,6 +262,7 @@ async def predict(files: List[UploadFile] = File(...)):
                 )
                 if res: all_results.append(res)
 
+            # Case 2: Multi-column format
             for col in columns:
                 m = re.match(r"^(.*)T(\d+)$", str(col))
                 if m:
