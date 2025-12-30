@@ -31,7 +31,7 @@ app.add_middleware(
 # ==========================================
 # 1. โหลดโมเดล
 # ==========================================
-MODEL_FILENAME = 'orchid_model_final.pkl'
+MODEL_FILENAME = 'orchid_decision_tree_v1.pkl'
 MODEL_PATH = os.path.join(os.path.dirname(__file__), MODEL_FILENAME)
 model_data = None
 
