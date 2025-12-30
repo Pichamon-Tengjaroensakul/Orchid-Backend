@@ -61,9 +61,7 @@ try:
             ref_df = pd.read_csv(REF_PATH)
         else:
             ref_df = pd.read_excel(REF_PATH)
-
-        # Clean column names (ลบช่องว่างหัวท้ายออกเพื่อความชัวร์)
-        ref_df.columns = ref_df.columns.str.strip()
+        ref_df.columns = ref_df.columns.str.strip() # Clean column names
         print(f"✅ Reference Data Loaded: {REF_DATA_FILENAME} ({len(ref_df)} rows)")
     else:
         print(f"⚠️ Reference Data Not Found at: {REF_PATH}")
@@ -103,46 +101,52 @@ def generate_plot_base64(user_t, user_f, species_name):
     try:
         plt.figure(figsize=(8, 5))
 
-        # 1. วาดเส้น User (สีน้ำเงิน)
+        # 1. วาดเส้น User (Blue)
         plt.plot(user_t, user_f, label='Your Sample', color='#0066cc', linewidth=2)
 
-        # 2. วาดเส้น Reference (สีแดง)
+        # 2. วาดเส้น Reference (Red)
         if ref_df is not None and species_name != "Unknown":
+            # --- แก้ไข Logic การค้นหาชื่อ ---
+            # 1. แปลงเป็นตัวพิมพ์เล็ก
+            search_key = species_name.lower().strip()
+
+            # 2. ถ้าชื่อลงท้ายด้วย 't' ให้ตัดออก (เช่น PtanalbaT -> ptanalba)
+            # เพื่อป้องกันการค้นหาซ้ำซ้อน (PtanalbaTT1)
+            if search_key.endswith('t'):
+                search_key = search_key[:-1]
+
+            # 3. ลบคำว่า 'sp' ถ้ามี
+            search_key = search_key.replace('sp', '').strip()
+
+            print(f"🔍 Searching Ref for: '{search_key}' (Orig: {species_name})")
+
             cols = ref_df.columns.tolist()
-
-            # เตรียมชื่อสายพันธุ์สำหรับค้นหา (ตัด 'sp' ออก, แปลงเป็นตัวเล็ก)
-            # เช่น "Ptanalba sp" -> "ptanalba"
-            clean_species = species_name.replace('sp', '').strip().lower()
-
             found_t = None
             found_f = None
 
-            # ✅ Logic ใหม่: ค้นหาด้วย Regex แบบเจาะจง
-            # รูปแบบ: ขึ้นต้นด้วยชื่อสายพันธุ์ + T + ตัวเลข + จบ string
-            # เช่น ^ptanalbat\d+$
-            pattern = fr"^{re.escape(clean_species)}t\d+$"
-
-            print(f"🔍 Searching Ref for: {clean_species} (Pattern: {pattern})")
-
+            # 4. วนลูปหาคอลัมน์ที่ขึ้นต้นด้วย search_key และมี T ตามด้วยตัวเลข
             for col in cols:
                 col_lower = str(col).lower()
 
-                if re.match(pattern, col_lower):
+                # เงื่อนไข:
+                # (1) ต้องมีชื่อสายพันธุ์ (ptanalba) อยู่ในชื่อคอลัมน์
+                # (2) ต้องมีตัว 't' ตามด้วยตัวเลข (t1, t2...)
+                if search_key in col_lower and re.search(r't\d+$', col_lower):
+
                     # เจอคอลัมน์ T แล้ว! (เช่น PtanalbaT1)
-                    # หาคู่ F ของมัน โดยเปลี่ยน 'T' ตัวสุดท้ายเป็น 'F'
-                    # หาตำแหน่ง T ตัวสุดท้าย
+                    # หาคู่ F ของมัน
                     last_t_idx = str(col).lower().rfind('t')
                     if last_t_idx != -1:
                         prefix = str(col)[:last_t_idx]
                         suffix = str(col)[last_t_idx+1:]
 
-                        # ลองสร้างชื่อ F (ลองทั้ง F ตัวใหญ่และ f ตัวเล็ก)
-                        candidate_f_upper = f"{prefix}F{suffix}"
+                        # ลองสร้างชื่อ F (ทั้ง F ตัวใหญ่และเล็ก)
+                        candidate_f = f"{prefix}F{suffix}"
                         candidate_f_lower = f"{prefix}f{suffix}"
 
-                        if candidate_f_upper in cols:
+                        if candidate_f in cols:
                             found_t = col
-                            found_f = candidate_f_upper
+                            found_f = candidate_f
                             break
                         elif candidate_f_lower in cols:
                             found_t = col
@@ -162,7 +166,7 @@ def generate_plot_base64(user_t, user_f, species_name):
                          label=f'Ref: {species_name}',
                          color='#ff3333', linestyle='--', linewidth=2, alpha=0.8)
             else:
-                print(f"   ❌ No matching columns found for pattern: {pattern}")
+                print(f"   ❌ No matching columns found for '{search_key}'")
 
         plt.title(f"Comparison: {species_name}", fontsize=14)
         plt.xlabel("Temperature (°C)")
@@ -189,7 +193,7 @@ def generate_plot_base64(user_t, user_f, species_name):
 @app.get("/")
 def home():
     ref_status = "Loaded" if ref_df is not None else "Not Found"
-    return {"message": f"Orchid AI Ready. Ref Data: {ref_status}"}
+    return {"message": f"Orchid AI Ready. Ref: {ref_status}"}
 
 @app.post("/predict")
 async def predict(files: List[UploadFile] = File(...)):
@@ -219,15 +223,15 @@ async def predict(files: List[UploadFile] = File(...)):
                     features_df = pd.DataFrame([[T_peak, F_peak, width, area]],
                                              columns=["T_peak", "F_peak", "Width_FWHM", "Area"])
 
-                    # 1. ทำนายสายพันธุ์
+                    # 1. Predict
                     pred_idx = model_data["model"].predict(features_df)[0]
                     species_name = model_data["label_encoder"].inverse_transform([pred_idx])[0]
 
-                    # 2. คำนวณ Confidence Score (%)
+                    # 2. Confidence
                     probabilities = model_data["model"].predict_proba(features_df)[0]
                     confidence = round(probabilities[pred_idx] * 100, 2)
 
-                    # 3. วาดกราฟ (พร้อมเส้น Ref)
+                    # 3. Plot (Smart Search)
                     plot_image = generate_plot_base64(t_arr, f_arr, species_name)
 
                     return {
@@ -238,7 +242,7 @@ async def predict(files: List[UploadFile] = File(...)):
                         "Width_FWHM": round(width, 4),
                         "Area": round(area, 4),
                         "predicted_species": species_name,
-                        "confidence_score": f"{confidence}%", # ✅ ส่งค่า % กลับไป
+                        "confidence_score": f"{confidence}%",
                         "plot_image": plot_image
                     }
                 return None
