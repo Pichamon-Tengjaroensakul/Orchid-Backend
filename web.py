@@ -19,6 +19,7 @@ import io
 
 app = FastAPI()
 
+# ตั้งค่า CORS ให้ Frontend (Lovable) เชื่อมต่อได้
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -28,9 +29,10 @@ app.add_middleware(
 )
 
 # ==========================================
-# 1. โหลดโมเดล
+# 1. โหลดโมเดล AI
 # ==========================================
-MODEL_FILENAME = 'orchid_model_final.pkl'
+# ⚠️ สำคัญ: ต้องอัปโหลดไฟล์โมเดลชื่อนี้ขึ้น GitHub ด้วย
+MODEL_FILENAME = 'orchid_decision_tree_v1.pkl'
 MODEL_PATH = os.path.join(os.path.dirname(__file__), MODEL_FILENAME)
 model_data = None
 
@@ -40,16 +42,18 @@ try:
         print(f"✅ โหลดโมเดลสำเร็จ: {MODEL_FILENAME}")
     else:
         print(f"❌ ไม่พบไฟล์โมเดลที่: {MODEL_PATH}")
+        print("👉 กรุณาอัปโหลดไฟล์ .pkl ขึ้น GitHub ให้เรียบร้อย")
 except Exception as e:
     print(f"❌ Error loading model: {e}")
 
 # ==========================================
-# 2. ฟังก์ชันคำนวณ Feature
+# 2. ฟังก์ชันคำนวณ Feature (Logic เดียวกับตอนเทรน)
 # ==========================================
 def extract_peak_features(t, f):
     try:
         mask = ~np.isnan(t) & ~np.isnan(f)
         t, f = np.asarray(t[mask]), np.asarray(f[mask])
+
         if len(t) < 3: return np.nan, np.nan, np.nan, np.nan
 
         sort_idx = np.argsort(t)
@@ -77,13 +81,14 @@ def extract_peak_features(t, f):
 # ==========================================
 @app.get("/")
 def home():
-    status = "Ready to Predict" if model_data else "Model NOT Loaded"
+    status = "พร้อมใช้งาน (Model Loaded)" if model_data else "ยังไม่พร้อม (Model Not Found)"
     return {"message": f"Orchid AI Backend: {status}"}
 
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
+    # เช็คว่ามีโมเดลไหม ถ้าไม่มีให้แจ้ง Error
     if not model_data:
-        raise HTTPException(status_code=500, detail="Model file not found on server.")
+        raise HTTPException(status_code=500, detail="Server Error: Model file (.pkl) not found.")
 
     try:
         contents = await file.read()
@@ -93,47 +98,54 @@ async def predict(file: UploadFile = File(...)):
         columns = df.columns.tolist()
         processed_pairs = set()
 
+        # ฟังก์ชันย่อยสำหรับประมวลผลแต่ละตัวอย่าง
         def process_and_predict(t_arr, f_arr, sample_name):
             T_peak, F_peak, width, area = extract_peak_features(t_arr, f_arr)
 
             if not np.isnan(T_peak):
+                # เตรียมข้อมูลสำหรับทำนาย (ต้องมี 4 คอลัมน์ตามที่เทรนมา)
                 features_df = pd.DataFrame([[T_peak, F_peak, width, area]],
                                          columns=["T_peak", "F_peak", "Width_FWHM", "Area"])
 
+                # ทำนายผลด้วยโมเดล
                 pred_idx = model_data["model"].predict(features_df)[0]
                 species_name = model_data["label_encoder"].inverse_transform([pred_idx])[0]
 
                 return {
                     "sample_id": sample_name,
-                    # ✅ ปรับทศนิยมเป็น 4 ตำแหน่งทุกตัวตามที่ขอครับ
-                    "T_peak": round(T_peak, 4),
-                    "F_peak": round(F_peak, 4),
-                    "Width_FWHM": round(width, 4),
-                    "Area": round(area, 4),
+                    "T_peak": round(T_peak, 4),      # ทศนิยม 4 ตำแหน่ง
+                    "F_peak": round(F_peak, 4),      # ทศนิยม 4 ตำแหน่ง
+                    "Width_FWHM": round(width, 4),   # ทศนิยม 4 ตำแหน่ง
+                    "Area": round(area, 4),          # ทศนิยม 4 ตำแหน่ง
                     "predicted_species": species_name
                 }
             return None
 
+        # --- กรณี 1: ไฟล์มีคอลัมน์ T, F (แบบไฟล์ทดสอบของคุณ) ---
         if 'T' in columns and 'F' in columns:
             t_vals = pd.to_numeric(df['T'], errors='coerce').values
             f_vals = pd.to_numeric(df['F'], errors='coerce').values
             res = process_and_predict(t_vals, f_vals, "Uploaded-Sample")
             if res: results.append(res)
 
+        # --- กรณี 2: ไฟล์มีหลายคอลัมน์ (SampleT1, SampleF1) ---
         for col in columns:
             m = re.match(r"^(.*)T(\d+)$", str(col))
             if m:
                 prefix, num = m.group(1), m.group(2)
                 f_col = f"{prefix}F{num}"
+
                 if f_col in columns and col not in processed_pairs:
                     processed_pairs.add(col)
+
                     t_vals = pd.to_numeric(df[col], errors='coerce').values
                     f_vals = pd.to_numeric(df[f_col], errors='coerce').values
+
                     res = process_and_predict(t_vals, f_vals, f"{prefix}-{num}")
                     if res: results.append(res)
 
         if not results:
-             return {"success": False, "message": "No valid data found."}
+             return {"success": False, "message": "No valid data found in Excel file."}
 
         return {"success": True, "results": results}
 
