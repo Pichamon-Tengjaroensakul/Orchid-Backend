@@ -54,21 +54,29 @@ try:
 except Exception as e:
     print(f"❌ Error loading model: {e}")
 
-# โหลด Reference Data (สำคัญมากสำหรับเส้นแดง)
+# โหลด Reference Data
 try:
     if os.path.exists(REF_PATH):
-        if REF_DATA_FILENAME.endswith('.csv'):
-            ref_df = pd.read_csv(REF_PATH)
-        else:
-            ref_df = pd.read_excel(REF_PATH)
+        # พยายามโหลดไฟล์ไม่ว่าเป็น CSV หรือ Excel
+        try:
+            if REF_DATA_FILENAME.endswith('.csv'):
+                ref_df = pd.read_csv(REF_PATH)
+            else:
+                ref_df = pd.read_excel(REF_PATH)
+        except:
+            # ถ้าโหลดแบบแรกไม่ได้ ให้ลองอีกแบบ (เผื่อคนตั้งชื่อนามสกุลผิด)
+            try:
+                ref_df = pd.read_csv(REF_PATH)
+            except:
+                ref_df = pd.read_excel(REF_PATH)
 
-        # ✅ CLEANING: ลบช่องว่างหัว-ท้าย และแปลงชื่อคอลัมน์ทั้งหมดเป็นตัวพิมพ์เล็กไว้ก่อนเลย
+        # ✅ CLEANING: ลบช่องว่างหัว-ท้าย และแปลงชื่อคอลัมน์ทั้งหมดเป็นตัวพิมพ์เล็ก
         ref_df.columns = ref_df.columns.str.strip().str.lower()
 
         print(f"✅ Reference Data Loaded: {len(ref_df)} rows")
-        print(f"📊 Example Columns in Ref Data: {list(ref_df.columns[:5])}") # Print ดูตัวอย่างชื่อคอลัมน์
+        print(f"📊 Columns Found (First 10): {list(ref_df.columns[:10])}")
     else:
-        print(f"⚠️ Reference Data Not Found! (File missing in GitHub?)")
+        print(f"⚠️ Reference Data Not Found! (Please upload PROJECT_DATA.xlsx to GitHub)")
 except Exception as e:
     print(f"⚠️ Error loading reference data: {e}")
 
@@ -110,56 +118,68 @@ def generate_plot_base64(user_t, user_f, species_name):
 
         # 2. วาดเส้น Reference (สีแดง)
         if ref_df is not None and species_name != "Unknown":
-            # --- DEBUG INFO ---
-            print(f"--- Plotting for: '{species_name}' ---")
+            # --- DEBUGGING START ---
+            print(f"\n--- 🔍 Searching Reference Line for: '{species_name}' ---")
 
-            # เตรียมคำค้นหา: แปลงเป็นตัวเล็ก, ตัด 'sp', ตัด 'T' ท้ายคำ
-            # เช่น "PtanalbaT" -> "ptanalba"
-            search_key = species_name.lower().replace('sp', '').strip()
-            if search_key.endswith('t'):
-                search_key = search_key[:-1]
+            # เตรียมคำค้นหา: ตัดคำว่า sp, ตัดตัว T ท้ายคำ, แปลงเป็นตัวเล็ก
+            clean_name = species_name.lower().replace('sp', '').strip()
+            if clean_name.endswith('t'): # เช่น PtanalbaT -> ptanalba
+                clean_name = clean_name[:-1]
 
-            print(f"   🔍 Key: '{search_key}'")
+            print(f"   -> Keyword used for search: '{clean_name}'")
 
             cols = list(ref_df.columns)
             target_t_col = None
             target_f_col = None
 
-            # --- SEARCH LOGIC (แบบกวาดทุกคอลัมน์) ---
+            # --- SEARCH LOGIC (แบบยืดหยุ่นที่สุด) ---
+            # วนลูปดูทุกคอลัมน์ใน Excel
             for col in cols:
-                # เงื่อนไข 1: ชื่อสายพันธุ์ต้องอยู่ในชื่อคอลัมน์ (เช่น 'ptanalba' อยู่ใน 'ptanalbat1')
-                if search_key in col:
-                    # เงื่อนไข 2: ต้องเป็นคอลัมน์ T (มี 't' และตามด้วยตัวเลข)
+                # 1. เช็คว่าชื่อคอลัมน์ มีคำค้นหาของเราปนอยู่ไหม (เช่น 'ptanalba' อยู่ใน 'ptanalbat1' ไหม)
+                if clean_name in col:
+                    # 2. เช็คว่าเป็นคอลัมน์ T หรือไม่ (ต้องมีตัว t และตามด้วยตัวเลข)
                     if 't' in col and any(char.isdigit() for char in col):
-                        # เจอคอลัมน์ T ที่น่าจะใช่แล้ว!
-                        # ลองสร้างชื่อคอลัมน์ F คู่กัน
-                        # เทคนิค: หาตัว t ตัวสุดท้าย แล้วเปลี่ยนเป็น f
+
+                        # เจอคอลัมน์ T แล้ว! สมมติว่าเป็น 'ptanalbat1'
+                        # พยายามหาคู่ F ของมัน (เปลี่ยน t ตัวสุดท้ายเป็น f)
                         last_t_index = col.rfind('t')
                         candidate_f = col[:last_t_index] + 'f' + col[last_t_index+1:]
 
                         if candidate_f in cols:
                             target_t_col = col
                             target_f_col = candidate_f
-                            print(f"   ✅ Found Match! T='{target_t_col}', F='{target_f_col}'")
-                            break # เจอคู่แรกเอาเลย
+                            print(f"   ✅ MATCH FOUND! Using columns: T='{target_t_col}', F='{target_f_col}'")
+                            break # เจอแล้วหยุดหาเลย
+
+            # ถ้าหาแบบแรกไม่เจอ ลองหาแบบหยาบๆ (ไม่สนใจ T/F แค่หา T ที่ชื่อตรง)
+            if not target_t_col:
+                 for col in cols:
+                    if col.startswith(clean_name) and 't' in col:
+                        # สมมติเจออะไรสักอย่าง ลองเสี่ยงทายคู่ F
+                        candidate_f = col.replace('t', 'f')
+                        if candidate_f in cols:
+                            target_t_col = col
+                            target_f_col = candidate_f
+                            print(f"   ⚠️ Fuzzy Match Found: T='{target_t_col}', F='{target_f_col}'")
+                            break
 
             # --- วาดกราฟเส้นแดง ---
             if target_t_col and target_f_col:
                 ref_t = pd.to_numeric(ref_df[target_t_col], errors='coerce')
                 ref_f = pd.to_numeric(ref_df[target_f_col], errors='coerce')
 
+                # ลบค่าว่าง
                 mask = ~np.isnan(ref_t) & ~np.isnan(ref_f)
                 ref_t, ref_f = ref_t[mask], ref_f[mask]
 
+                # Sort ข้อมูลก่อนพล็อต (สำคัญมาก ไม่งั้นเส้นพันกัน)
                 sort_idx = np.argsort(ref_t)
+
                 plt.plot(ref_t.iloc[sort_idx], ref_f.iloc[sort_idx],
                          label=f'Ref: {species_name}',
                          color='#ff3333', linestyle='--', linewidth=2, alpha=0.8)
             else:
-                print(f"   ❌ NO MATCH FOUND for key '{search_key}' in reference file.")
-                # ถ้าไม่เจอ ลองปริ้นท์ชื่อคอลัมน์ใกล้เคียงให้ดูหน่อย
-                nearby = [c for c in cols if search_key in c]
-                print(f"   Available columns containing '{search_key}': {nearby}")
+                print(f"   ❌ NO MATCH. Scanned {len(cols)} columns but found nothing for '{clean_name}'")
 
         plt.title(f"Comparison: {species_name}", fontsize=14)
         plt.xlabel("Temperature (°C)")
@@ -224,7 +244,7 @@ async def predict(files: List[UploadFile] = File(...)):
                     probabilities = model_data["model"].predict_proba(features_df)[0]
                     confidence = round(probabilities[pred_idx] * 100, 2)
 
-                    # 3. Plot
+                    # 3. Plot (Debug Mode)
                     plot_image = generate_plot_base64(t_arr, f_arr, species_name)
 
                     return {
