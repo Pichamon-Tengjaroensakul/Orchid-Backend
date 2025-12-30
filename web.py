@@ -19,7 +19,7 @@ import re
 import io
 import base64
 import matplotlib
-matplotlib.use('Agg')
+matplotlib.use('Agg') # ใช้ Backend แบบไม่แสดงหน้าต่าง (จำเป็นสำหรับ Server)
 import matplotlib.pyplot as plt
 
 app = FastAPI()
@@ -44,7 +44,7 @@ REF_PATH = os.path.join(os.path.dirname(__file__), REF_DATA_FILENAME)
 model_data = None
 ref_df = None
 
-# โหลดโมเดล
+# 1.1 โหลดโมเดล
 try:
     if os.path.exists(MODEL_PATH):
         model_data = joblib.load(MODEL_PATH)
@@ -54,9 +54,10 @@ try:
 except Exception as e:
     print(f"❌ Error loading model: {e}")
 
-# โหลด Reference Data
+# 1.2 โหลด Reference Data (PROJECT_DATA.xlsx)
 try:
     if os.path.exists(REF_PATH):
+        # พยายามโหลดไฟล์ (รองรับทั้ง csv และ excel)
         try:
             if REF_DATA_FILENAME.endswith('.csv'):
                 ref_df = pd.read_csv(REF_PATH)
@@ -65,11 +66,11 @@ try:
         except:
             ref_df = pd.read_excel(REF_PATH)
 
-        # ✅ Cleaning: แปลงชื่อคอลัมน์เป็นตัวพิมพ์เล็ก และตัดช่องว่างทิ้ง
-        ref_df.columns = ref_df.columns.str.strip().str.lower()
+        # ✅ Cleaning: ลบช่องว่างหัวท้ายชื่อคอลัมน์
+        ref_df.columns = ref_df.columns.str.strip()
         print(f"✅ Reference Data Loaded: {len(ref_df)} rows")
     else:
-        print(f"⚠️ Reference Data Not Found!")
+        print(f"⚠️ Reference Data Not Found! (Reference lines will not show)")
 except Exception as e:
     print(f"⚠️ Error loading reference data: {e}")
 
@@ -103,75 +104,82 @@ def extract_peak_features(t, f):
         return np.nan, np.nan, np.nan, np.nan
 
 def generate_plot_base64(user_t, user_f, species_name):
+    """
+    ฟังก์ชันวาดกราฟ:
+    - วาดเส้น Reference ทั้งหมดที่เกี่ยวข้องกับสายพันธุ์ (สีแดงจางๆ)
+    - วาดเส้น User Data ทับลงไป (สีดำหนา)
+    """
     try:
-        # ตั้งค่ากราฟให้สวยงาม (ขนาดและ Font)
         plt.figure(figsize=(8, 5))
 
-        # 1. วาดเส้น User (สีน้ำเงิน)
-        plt.plot(user_t, user_f, label='Your Sample', color='#0066cc', linewidth=2.5)
-
-        # 2. วาดเส้น Reference (สีแดง)
+        # ---------------------------------------------------------
+        # ส่วนที่ 1: วาดเส้น Reference (PROJECT_DATA) ไว้ข้างหลัง
+        # ---------------------------------------------------------
+        has_ref = False
         if ref_df is not None and species_name != "Unknown":
-            print(f"--- Searching Ref for: {species_name} ---")
+            # เตรียมคำค้นหา: ตัดคำว่า sp, ตัดตัว T ท้ายคำ
+            clean_name = species_name.replace('sp', '').strip()
+            if clean_name.endswith('T') or clean_name.endswith('t'):
+                 clean_name = clean_name[:-1]
 
-            # เตรียมคำค้นหา: ตัด sp, ตัด T ท้ายคำ
-            search_key = species_name.lower().replace('sp', '').strip()
-            if search_key.endswith('t'): search_key = search_key[:-1]
-
-            # ค้นหาคอลัมน์ทั้งหมดที่เข้าข่าย: "ชื่อสายพันธุ์ + T + ตัวเลข"
-            # Regex: ^search_key + t + \d+
-            pattern = re.compile(f"^{re.escape(search_key)}t\\d+$", re.IGNORECASE)
-
+            # แปลงเป็นตัวพิมพ์เล็กเพื่อค้นหาแบบ case-insensitive
+            clean_name_lower = clean_name.lower()
             cols = list(ref_df.columns)
-            matched_cols = [c for c in cols if pattern.match(c)]
 
-            target_t_col = None
-            target_f_col = None
+            # วนลูปหา "ทุกคอลัมน์" ที่ตรงกับสายพันธุ์นี้ เพื่อวาดเป็นกลุ่ม
+            for col in cols:
+                col_lower = col.lower()
 
-            if matched_cols:
-                # เรียงลำดับชื่อคอลัมน์ (เพื่อให้ได้ T1, T2, T3...)
-                # เราจะเลือกตัวแรกสุดที่เจอ (เช่น ถ้ามี T2 ก็เอา T2 เลย ไม่ต้องรอ T1)
-                matched_cols.sort()
-                target_t_col = matched_cols[0]
+                # เช็คว่าชื่อคอลัมน์มีชื่อสายพันธุ์ และเป็นคอลัมน์ T (มี T ตามด้วยตัวเลข)
+                if clean_name_lower in col_lower and 't' in col_lower and any(c.isdigit() for c in col):
 
-                print(f"   ✅ Selected Ref Column: {target_t_col}")
+                    # หาคู่ F ของมัน (เปลี่ยน T ตัวสุดท้ายเป็น F)
+                    # เราต้องหาตำแหน่ง T ตัวสุดท้ายในชื่อจริง (Original Case)
+                    is_upper_t = 'T' in col
+                    last_t_idx = col.rfind('T') if is_upper_t else col.rfind('t')
 
-                # หา F คู่กัน (เปลี่ยน t ตัวสุดท้ายเป็น f)
-                last_t = target_t_col.rfind('t')
-                candidate_f = target_t_col[:last_t] + 'f' + target_t_col[last_t+1:]
+                    # สร้างชื่อ F ที่คาดหวัง
+                    col_f = col[:last_t_idx] + ('F' if is_upper_t else 'f') + col[last_t_idx+1:]
 
-                if candidate_f in cols:
-                    target_f_col = candidate_f
-                else:
-                    print(f"   ❌ F-column not found for {target_t_col}")
+                    # ถ้ามีคอลัมน์ F คู่กัน ให้วาดเส้น
+                    if col_f in cols:
+                        ref_t = pd.to_numeric(ref_df[col], errors='coerce')
+                        ref_f = pd.to_numeric(ref_df[col_f], errors='coerce')
 
-            # วาดกราฟ
-            if target_t_col and target_f_col:
-                ref_t = pd.to_numeric(ref_df[target_t_col], errors='coerce')
-                ref_f = pd.to_numeric(ref_df[target_f_col], errors='coerce')
+                        mask = ~np.isnan(ref_t) & ~np.isnan(ref_f)
+                        ref_t, ref_f = ref_t[mask], ref_f[mask]
+                        sort_idx = np.argsort(ref_t)
 
-                mask = ~np.isnan(ref_t) & ~np.isnan(ref_f)
-                ref_t, ref_f = ref_t[mask], ref_f[mask]
+                        # วาดเส้น Reference เป็นสีแดงจางๆ (alpha=0.4)
+                        plt.plot(ref_t.iloc[sort_idx], ref_f.iloc[sort_idx],
+                                 color='#ff3333', linestyle='--', linewidth=1, alpha=0.3)
+                        has_ref = True
 
-                # Sort ตามอุณหภูมิ (สำคัญมาก ไม่งั้นกราฟยึกยือ)
-                sort_idx = np.argsort(ref_t)
+        # ---------------------------------------------------------
+        # ส่วนที่ 2: วาดเส้น User (Test Data) เป็น "เส้นสีดำหนา"
+        # ---------------------------------------------------------
+        plt.plot(user_t, user_f, label='Your Sample', color='black', linewidth=2.5)
 
-                plt.plot(ref_t.iloc[sort_idx], ref_f.iloc[sort_idx],
-                         label=f'Ref: {species_name}',
-                         color='#ff3333', linestyle='--', linewidth=2, alpha=0.8)
-            else:
-                print(f"❌ No matching pair found for {species_name}")
-
+        # ตกแต่งกราฟ
         plt.title(f"Comparison: {species_name}", fontsize=14, fontweight='bold')
         plt.xlabel("Temperature (°C)", fontsize=12)
         plt.ylabel("Fluorescence (Diff)", fontsize=12)
-        plt.legend(fontsize=10)
+
+        # สร้าง Legend แบบกำหนดเอง (เพื่อให้ดูสะอาดตา)
+        from matplotlib.lines import Line2D
+        legend_elements = [
+            Line2D([0], [0], color='black', lw=2.5, label='Your Sample'),
+        ]
+        if has_ref:
+            legend_elements.append(Line2D([0], [0], color='#ff3333', lw=1, linestyle='--', label=f'Ref: {species_name}'))
+
+        plt.legend(handles=legend_elements, loc='upper right')
         plt.grid(True, linestyle=':', alpha=0.6)
         plt.tight_layout()
 
-        # Save Plot to Base64
+        # แปลงกราฟเป็น Base64 ส่งกลับไป
         buf = io.BytesIO()
-        plt.savefig(buf, format='png', dpi=120) # เพิ่ม DPI ให้ชัดขึ้น
+        plt.savefig(buf, format='png', dpi=120)
         plt.close()
         buf.seek(0)
         img_str = base64.b64encode(buf.read()).decode('utf-8')
@@ -202,6 +210,7 @@ async def predict(files: List[UploadFile] = File(...)):
             contents = await file.read()
             filename = file.filename.lower()
             try:
+                # อ่านไฟล์
                 if filename.endswith('.csv'):
                     df = pd.read_csv(io.BytesIO(contents))
                 else:
@@ -212,21 +221,22 @@ async def predict(files: List[UploadFile] = File(...)):
             columns = df.columns.tolist()
             processed_pairs = set()
 
+            # ฟังก์ชันย่อยสำหรับประมวลผลแต่ละคู่ T,F
             def process_and_predict(t_arr, f_arr, sample_name):
                 T_peak, F_peak, width, area = extract_peak_features(t_arr, f_arr)
                 if not np.isnan(T_peak):
                     features_df = pd.DataFrame([[T_peak, F_peak, width, area]],
                                              columns=["T_peak", "F_peak", "Width_FWHM", "Area"])
 
-                    # 1. Prediction
+                    # 1. ทำนายผล
                     pred_idx = model_data["model"].predict(features_df)[0]
                     species_name = model_data["label_encoder"].inverse_transform([pred_idx])[0]
 
-                    # 2. Confidence
+                    # 2. คำนวณความมั่นใจ (%)
                     probabilities = model_data["model"].predict_proba(features_df)[0]
                     confidence = round(probabilities[pred_idx] * 100, 2)
 
-                    # 3. Plotting
+                    # 3. สร้างกราฟ (Reference + User Plot)
                     plot_image = generate_plot_base64(t_arr, f_arr, species_name)
 
                     return {
@@ -242,7 +252,7 @@ async def predict(files: List[UploadFile] = File(...)):
                     }
                 return None
 
-            # Case: T, F columns
+            # กรณีที่ 1: ไฟล์มีคอลัมน์ T และ F เดี่ยวๆ (User Upload)
             if 'T' in columns and 'F' in columns:
                 res = process_and_predict(
                     pd.to_numeric(df['T'], errors='coerce').values,
@@ -251,7 +261,7 @@ async def predict(files: List[UploadFile] = File(...)):
                 )
                 if res: all_results.append(res)
 
-            # Case: Multi columns
+            # กรณีที่ 2: ไฟล์มีหลายคอลัมน์ (เช่น T1, F1, T2, F2...)
             for col in columns:
                 m = re.match(r"^(.*)T(\d+)$", str(col))
                 if m:
