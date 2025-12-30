@@ -32,24 +32,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# =========================================================
-# 🔧 ส่วนตั้งค่าการจับคู่ (MANUAL MAPPING) - แก้ตรงนี้!
-# =========================================================
-# ใส่ชื่อสายพันธุ์ที่โมเดลทายได้ทางซ้าย : ใส่ชื่อคอลัมน์ T ในไฟล์ PROJECT_DATA ทางขวา
-# (ถ้าเส้นแดงไม่ขึ้น ให้มาเพิ่มชื่อในนี้ครับ)
-SPECIES_MAPPING = {
-    # "ชื่อจาก AI": "ชื่อคอลัมน์ใน Excel"
-    "Ptanalba": "PtanalbaT1",
-    "PtanalbaT": "PtanalbaT1",
-    "Ptan": "PtanT1",
-    "PtanT": "PtanT1",
-    "Ptak": "PtakT1",
-    "PtakT": "PtakT1",
-    "Pmis": "PmisT2",
-    "PmisT": "PmisT2",
-    # เพิ่มคู่ใหม่ตรงนี้ได้เรื่อยๆ...
-}
-
 # ==========================================
 # 1. SETUP & LOAD DATA
 # ==========================================
@@ -72,23 +54,25 @@ try:
 except Exception as e:
     print(f"❌ Error loading model: {e}")
 
-# โหลด Reference Data
+# โหลด Reference Data (สำคัญมาก!)
 try:
     if os.path.exists(REF_PATH):
-        # พยายามอ่านไฟล์ (รองรับทั้ง csv และ excel)
+        # พยายามโหลดไฟล์ (รองรับกรณีอัปโหลดเป็น csv มาในชื่อ xlsx)
         try:
             if REF_DATA_FILENAME.endswith('.csv'):
                 ref_df = pd.read_csv(REF_PATH)
             else:
                 ref_df = pd.read_excel(REF_PATH)
         except:
-            ref_df = pd.read_excel(REF_PATH)
+             # Fallback
+             ref_df = pd.read_excel(REF_PATH)
 
-        # ลบช่องว่างหัวท้ายชื่อคอลัมน์
-        ref_df.columns = ref_df.columns.str.strip()
+        # ✅ CLEANING: ทำชื่อคอลัมน์ให้สะอาด (ตัดช่องว่าง, ตัวเล็ก)
+        ref_df.columns = ref_df.columns.str.strip().str.lower()
         print(f"✅ Reference Data Loaded: {len(ref_df)} rows")
+        print(f"   Sample Cols: {list(ref_df.columns[:10])}")
     else:
-        print(f"⚠️ Reference Data Not Found! (Reference line will not show)")
+        print(f"⚠️ Reference Data Not Found! (Red line will be missing)")
 except Exception as e:
     print(f"⚠️ Error loading reference data: {e}")
 
@@ -130,59 +114,66 @@ def generate_plot_base64(user_t, user_f, species_name):
 
         # 2. วาดเส้น Reference (สีแดง)
         if ref_df is not None and species_name != "Unknown":
+            print(f"--- Searching Ref for: {species_name} ---")
+
+            # เตรียมคำค้นหา: ตัด sp, ตัด T ท้ายคำ (เช่น PtanalbaT -> ptanalba)
+            search_key = species_name.lower().replace('sp', '').strip()
+            if search_key.endswith('t'):
+                search_key = search_key[:-1]
+
+            # ค้นหาคอลัมน์ทั้งหมดที่เข้าข่าย: "ชื่อสายพันธุ์ + T + ตัวเลข"
+            # เช่นเจอ: [pmist2, pmist3, pmist4]
+            cols = list(ref_df.columns)
+            matched_cols = []
+
+            for col in cols:
+                # เช็คว่ามี key อยู่ในชื่อ และต้องเป็น pattern: key + t + number
+                # ใช้ regex เพื่อความชัวร์: ^key + t + \d+
+                if re.search(f"{re.escape(search_key)}t\\d+", col):
+                    matched_cols.append(col)
+
             target_t_col = None
+            target_f_col = None
 
-            # --- วิธีที่ 1: หาจาก Manual Mapping ก่อน (ชัวร์สุด) ---
-            # ตัดคำว่า sp หรือช่องว่างออกก่อนเทียบ
-            clean_key = species_name.replace('sp', '').strip()
+            if matched_cols:
+                # เรียงลำดับชื่อคอลัมน์ เพื่อให้ T1, T2, T3 เรียงกันสวยๆ
+                matched_cols.sort()
 
-            if species_name in SPECIES_MAPPING:
-                target_t_col = SPECIES_MAPPING[species_name]
-                print(f"✅ Found in Mapping: {species_name} -> {target_t_col}")
-            elif clean_key in SPECIES_MAPPING:
-                target_t_col = SPECIES_MAPPING[clean_key]
-                print(f"✅ Found in Mapping (Cleaned): {clean_key} -> {target_t_col}")
-
-            # --- วิธีที่ 2: ถ้าไม่เจอใน Map ให้ลอง Auto Search ---
-            if not target_t_col:
-                print(f"⚠️ Not in map, trying auto-search for: {clean_key}")
-                cols = list(ref_df.columns)
-                # Regex: ชื่อสายพันธุ์ + T + ตัวเลข (Case Insensitive)
-                pattern = re.compile(f"^{re.escape(clean_key)}T\\d+$", re.IGNORECASE)
-
-                matches = [c for c in cols if pattern.match(c)]
-                # ถ้าเจอ T1 เอา T1 ก่อน, ถ้าไม่มีเอาอันแรก
-                t1_match = next((m for m in matches if m.lower().endswith('t1')), None)
-                if t1_match: target_t_col = t1_match
-                elif matches: target_t_col = matches[0]
-
-            # --- วาดกราฟ ---
-            if target_t_col and target_t_col in ref_df.columns:
-                # หาคอลัมน์ F คู่กัน (เปลี่ยน T สุดท้ายเป็น F)
-                last_t_idx = target_t_col.lower().rfind('t')
-                target_f_col_upper = target_t_col[:last_t_idx] + 'F' + target_t_col[last_t_idx+1:]
-                target_f_col_lower = target_t_col[:last_t_idx] + 'f' + target_t_col[last_t_idx+1:]
-
-                target_f_col = None
-                if target_f_col_upper in ref_df.columns: target_f_col = target_f_col_upper
-                elif target_f_col_lower in ref_df.columns: target_f_col = target_f_col_lower
-
-                if target_f_col:
-                    print(f"   Plotting Ref: {target_t_col} & {target_f_col}")
-                    ref_t = pd.to_numeric(ref_df[target_t_col], errors='coerce')
-                    ref_f = pd.to_numeric(ref_df[target_f_col], errors='coerce')
-
-                    mask = ~np.isnan(ref_t) & ~np.isnan(ref_f)
-                    ref_t, ref_f = ref_t[mask], ref_f[mask]
-                    sort_idx = np.argsort(ref_t)
-
-                    plt.plot(ref_t.iloc[sort_idx], ref_f.iloc[sort_idx],
-                             label=f'Ref: {species_name}',
-                             color='#ff3333', linestyle='--', linewidth=2, alpha=0.8)
+                # พยายามหา T1 ก่อน
+                t1 = next((c for c in matched_cols if 't1' in c), None)
+                if t1:
+                    target_t_col = t1
                 else:
-                    print(f"❌ Found T col {target_t_col} but F col missing.")
+                    # ถ้าไม่มี T1 (เช่นเคส Pmis) ให้เอาตัวแรกที่เจอ (เช่น T2)
+                    target_t_col = matched_cols[0]
+
+                print(f"   Selected T Col: {target_t_col}")
+
+                # หา F คู่กัน
+                # เปลี่ยน t ตัวสุดท้ายเป็น f
+                last_t = target_t_col.rfind('t')
+                candidate_f = target_t_col[:last_t] + 'f' + target_t_col[last_t+1:]
+
+                if candidate_f in cols:
+                    target_f_col = candidate_f
+                    print(f"   Found F Col: {target_f_col}")
+
+            # วาดกราฟ
+            if target_t_col and target_f_col:
+                ref_t = pd.to_numeric(ref_df[target_t_col], errors='coerce')
+                ref_f = pd.to_numeric(ref_df[target_f_col], errors='coerce')
+
+                mask = ~np.isnan(ref_t) & ~np.isnan(ref_f)
+                ref_t, ref_f = ref_t[mask], ref_f[mask]
+
+                # Sort T
+                sort_idx = np.argsort(ref_t)
+
+                plt.plot(ref_t.iloc[sort_idx], ref_f.iloc[sort_idx],
+                         label=f'Ref: {species_name}',
+                         color='#ff3333', linestyle='--', linewidth=2, alpha=0.8)
             else:
-                print(f"❌ No matching column found for {species_name}")
+                print(f"❌ No matching pair found for {search_key}")
 
         plt.title(f"Comparison: {species_name}", fontsize=14)
         plt.xlabel("Temperature (°C)")
@@ -239,12 +230,15 @@ async def predict(files: List[UploadFile] = File(...)):
                     features_df = pd.DataFrame([[T_peak, F_peak, width, area]],
                                              columns=["T_peak", "F_peak", "Width_FWHM", "Area"])
 
+                    # 1. Prediction
                     pred_idx = model_data["model"].predict(features_df)[0]
                     species_name = model_data["label_encoder"].inverse_transform([pred_idx])[0]
 
+                    # 2. Confidence
                     probabilities = model_data["model"].predict_proba(features_df)[0]
                     confidence = round(probabilities[pred_idx] * 100, 2)
 
+                    # 3. Plotting
                     plot_image = generate_plot_base64(t_arr, f_arr, species_name)
 
                     return {
@@ -260,6 +254,7 @@ async def predict(files: List[UploadFile] = File(...)):
                     }
                 return None
 
+            # Case: T, F Columns
             if 'T' in columns and 'F' in columns:
                 res = process_and_predict(
                     pd.to_numeric(df['T'], errors='coerce').values,
@@ -268,6 +263,7 @@ async def predict(files: List[UploadFile] = File(...)):
                 )
                 if res: all_results.append(res)
 
+            # Case: Multi Columns
             for col in columns:
                 m = re.match(r"^(.*)T(\d+)$", str(col))
                 if m:
