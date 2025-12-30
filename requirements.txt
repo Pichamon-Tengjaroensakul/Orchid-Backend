@@ -3,7 +3,7 @@ uvicorn
 python-multipart
 pandas
 numpy
-openpyxl
 joblib
-scikit-learn==1.6.1  
+scikit-learn==1.6.1
 matplotlib
+openpyxl
